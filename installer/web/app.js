@@ -9,6 +9,7 @@ const ICONS = {
   ok: '<svg viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>',
   warn: '<svg viewBox="0 0 24 24"><path d="M12 4l9 16H3z"/><path d="M12 10v4M12 17.5v.01"/></svg>',
   bad: '<svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg>',
+  folder: '<path d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2z" />',
   install: '<path d="M12 3v12m0 0l-5-5m5 5l5-5M4 19h16" />',
   repair: '<path d="M14.7 6.3a4 4 0 00-5.4 5.4L3 18l3 3 6.3-6.3a4 4 0 005.4-5.4l-2.6 2.6-2.4-.6-.6-2.4z" />',
 };
@@ -37,7 +38,7 @@ function el(tag, cls, text) {
 function situation(v) {
   const s = v.scan;
   if (!s && v.scanning) return { kind: 'busy', title: 'Getting ready…', text: 'Looking at your game and its hand tablet.' };
-  if (!s || s.found === false) return { kind: 'bad', title: "Can't find Echo VR", text: 'Open Details and pick the folder called ready-at-dawn-echo-arena.' };
+  if (!s || s.found === false) return { kind: 'bad', title: "Can't find Echo VR", text: 'Show us where it is: pick the folder called ready-at-dawn-echo-arena.', action: 'browse' };
   const p = s.problems.join(' ');
   if (/build/.test(p)) return { kind: 'bad', title: 'Different Echo VR version', text: 'EchoQueue is made for Echo VR build 1683152886.' };
   if (/EchoLoader/.test(p)) return { kind: 'bad', title: 'EchoLoader needed', text: 'Install EchoLoader first: EchoQueue runs as one of its plugins.' };
@@ -70,11 +71,11 @@ function renderMain(v) {
   }
 
   const busy = v.job.busy || v.scanning;
-  const blocked = !sit.action || /running/.test(s ? s.problems.join(' ') : '');
+  const blocked = !sit.action || /running/.test(s && s.problems ? s.problems.join(' ') : '');
   $('install').disabled = busy || blocked;
-  $('ctatext').textContent = sit.action === 'repair' ? (sit.installed ? 'Repair EchoQueue' : 'Repair now') : 'Install EchoQueue';
-  $('ctaicon').innerHTML = sit.action === 'repair' ? ICONS.repair : ICONS.install;
-  $('uninstall').hidden = !(s && (s.state.startsWith('installed') || s.state.includes('Repair')));
+  $('ctatext').textContent = sit.action === 'browse' ? 'Find my Echo VR folder' : sit.action === 'repair' ? (sit.installed ? 'Repair EchoQueue' : 'Repair now') : 'Install EchoQueue';
+  $('ctaicon').innerHTML = sit.action === 'browse' ? ICONS.folder : sit.action === 'repair' ? ICONS.repair : ICONS.install;
+  $('uninstall').hidden = !(s && s.state && (s.state.startsWith('installed') || s.state.includes('Repair')));
   $('uninstall').disabled = busy;
   $('rescan').disabled = busy;
 
@@ -87,7 +88,13 @@ function renderMain(v) {
   $('notes').replaceChildren(...notes.map((n) => el('li', '', n)));
   const btn = $('detailsbtn');
   btn.className = 'link' + (notes.length && $('details').hidden ? ' hint' : '');
-  btn.textContent = $('details').hidden ? (notes.length ? `${notes.length} note${notes.length > 1 ? 's' : ''} about your mods` : 'Details') : 'Hide details';
+  btn.textContent = $('details').hidden ? (notes.length ? `Details (${notes.length} note${notes.length > 1 ? 's' : ''})` : 'Details') : 'Hide details';
+  // the folder, shown from its end (the part that tells installs apart)
+  const found = v.game && !(s && s.found === false);
+  $('where').textContent = found ? '‎' + v.game : 'Echo VR not found: pick its folder';
+  $('where').title = v.game || '';
+  $('change').textContent = found ? 'Change' : 'Find it';
+  $('change').disabled = busy;
 }
 
 function renderTablet(v) {
@@ -159,6 +166,7 @@ function confirmBox(title, text, yes) {
 }
 
 $('install').onclick = async () => {
+  if (situation(view).action === 'browse') return render(await api('browse', {}));
   const repair = situation(view).action === 'repair';
   const ok = await confirmBox(repair ? 'Repair EchoQueue?' : 'Install EchoQueue?',
     `${repair ? 'This rebuilds the PLAY tab on your tablet as it is now.' : 'This adds the PLAY tab to your hand tablet.'}\nKeep Echo VR closed until it's done.`,
@@ -175,6 +183,7 @@ $('uninstall').onclick = async () => {
 $('detailsbtn').onclick = () => { $('details').hidden = !$('details').hidden; if (view) renderMain(view); };
 $('rescan').onclick = async () => render(await api('rescan', {}));
 $('browse').onclick = async () => render(await api('browse', {}));
+$('change').onclick = async () => render(await api('browse', {}));
 $('done').onclick = () => { showResult = false; refresh(); };
 $('admin').onclick = () => api('admin', {});
 

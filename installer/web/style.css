@@ -198,3 +198,10 @@ h2 { margin: 0; font-size: 30px; line-height: 1.15; font-weight: 700; letter-spa
 /* signature, top left: the app's own font, a slightly lighter teal than the glow behind it */
 .credit { position: fixed; top: 10px; left: 14px; z-index: 50; font: 700 12px var(--sans); letter-spacing: .02em;
           color: rgba(95, 247, 232, .32); pointer-events: none; user-select: none; }
+
+/* the game folder, on the main screen */
+.where { display: flex; align-items: center; gap: 8px; margin-top: -6px; font-size: 13px; color: var(--dim); min-width: 0; }
+.where svg { width: 16px; height: 16px; flex: none; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linejoin: round; }
+.where span { flex: 1; min-width: 0; font: 12.5px var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left; }
+.link.change { color: var(--teal); font-weight: 600; }
+.link.change:hover { color: #8ffff4; border-bottom-color: rgba(46, 230, 214, .4); }
