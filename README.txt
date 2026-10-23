@@ -1,10 +1,11 @@
-EchoQueue 3.11 - Echo Arena matchmaking from your hand tablet (Echo VR, EchoVRCE)
+EchoQueue 3.12 - Echo Arena matchmaking from your hand tablet (Echo VR, EchoVRCE)
 
 What it does
   A PLAY tab, first on the hand tablet's tab bar:
   * FIND MATCH queues for a public Echo Arena match (CANCEL SEARCH while searching, with a
     queue timer) and joins it when one is found. F9 in Echo's window does the same.
-  * PRIVATE MATCH creates a private Echo Arena match on the server set in EchoQueue.ini.
+  * PRIVATE MATCH creates a private Echo Arena match on the game server with your lowest ping
+    (EchoVRCE's matchmaker picks it), or on a server of your choice set in EchoQueue.ini.
   * LOBBY takes you from a match back to the social lobby.
   * A stats box (tap to switch): hours played today, matches overall, players online.
   * Joining or leaving fades the headset to black (after [fade] delay_ms).

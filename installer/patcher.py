@@ -21,7 +21,7 @@ from pathlib import Path
 import echodata as E
 import tablet
 
-VERSION = '3.11'
+VERSION = '3.12'
 EXE_TIMESTAMP = 1683152886
 DATA = Path('_data/5932408047/rad15/win10')
 STOCK_PACKAGES = 3

@@ -328,9 +328,14 @@ std::string privateServer;
 uint32_t privateIp = 0;                // network byte order, 0 = let the server choose
 std::vector<uint16_t> privatePorts;
 
+// Private matches go where EchoVRCE's matchmaker puts them, which is the game server with the
+// lowest ping for the player creating it (from the pings Echo measures to every server while
+// matchmaking). [private] use_server=1 pins them to [private] server instead (older EchoQueue
+// pinned Maidenhead for everyone, which was far away for players outside the UK).
 void loadPrivateServer() {
     wchar_t buffer[128];
-    GetPrivateProfileStringW(L"private", L"server", L"80.64.218.95", buffer, 128, iniPath().c_str());
+    GetPrivateProfileStringW(L"private", L"server", L"", buffer, 128, iniPath().c_str());
+    if (!GetPrivateProfileIntW(L"private", L"use_server", 0, iniPath().c_str())) buffer[0] = 0;
     unsigned a, b, c, d;
     privateIp = swscanf(buffer, L"%u.%u.%u.%u", &a, &b, &c, &d) == 4 && a < 256 && b < 256 && c < 256 && d < 256
                     ? a | b << 8 | c << 16 | d << 24 : 0;
@@ -347,7 +352,7 @@ void loadPrivateServer() {
     unsigned last = GetPrivateProfileIntW(L"private", L"last_port", 0, iniPath().c_str());
     auto it = std::find(privatePorts.begin(), privatePorts.end(), uint16_t(last));
     if (it != privatePorts.end()) std::rotate(privatePorts.begin(), it, it + 1);
-    if (!privateIp || privatePorts.empty()) { privateIp = 0; logf("settings: private matches go wherever the server puts them"); }
+    if (!privateIp || privatePorts.empty()) { privateIp = 0; logf("settings: private matches go to the game server with your lowest ping (the matchmaker picks it)"); }
     else logf("settings: private matches on %s (%zu port(s), %u first)", privateServer.c_str(), privatePorts.size(), unsigned(privatePorts[0]));
 }
 
@@ -1299,7 +1304,7 @@ DWORD WINAPI playersWatch(LPVOID) {
 // sends the account's ID and display name from the saved profile (xplatformid, displayname)
 // and gets back blocked or not. The answer is kept in EchoQueue.ini ([access] blocked) for
 // when the service can't be reached; with no answer ever, EchoQueue stays on.
-constexpr const char* ECHOQUEUE_VERSION = "3.11";
+constexpr const char* ECHOQUEUE_VERSION = "3.12";
 constexpr const wchar_t* ACCESS_HOST = L"echoqueue.dokuyegar.workers.dev";  // the deployed Worker (server/worker.js)
 constexpr U ACCESS_EVERY_MS = 15 * 60 * 1000;
 
@@ -2061,7 +2066,7 @@ void installTablet() {
 }
 
 void initialize() {
-    logf("EchoQueue v3.11 starting (pid %lu)", GetCurrentProcessId());
+    logf("EchoQueue v3.12 starting (pid %lu)", GetCurrentProcessId());
     if (!verifyExecutable()) { fault = tabletFault = true; logf("EchoQueue disabled"); return; }
     loadSettings();
     loadToday();
