@@ -14,13 +14,6 @@ What it does
   Needs Echo VR build 1683152886 and EchoLoader. On any other build it switches itself off and
   says so in plugins\EchoQueue.log.
 
-What it sends
-  When Echo starts, and every 15 minutes while it runs, EchoQueue sends your Echo display name and
-  account ID (the OVR-ORG-... number in your Echo profile) and the EchoQueue version to its
-  author's access service, which answers whether EchoQueue may be used on this account. Nothing
-  else is sent. The author can see who uses EchoQueue and turn it off for an account; if that
-  happens, the PLAY page says "ECHOQUEUE IS OFF FOR THIS ACCOUNT" and Echo itself is unaffected.
-
 Installing (players)
   Close Echo VR, run EchoQueueInstaller.exe. Its window (shown by Microsoft Edge, part of Windows;
   without Edge it opens in your browser) finds Echo (or use Change...), shows your tab bar as it will
