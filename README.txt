@@ -1,4 +1,4 @@
-EchoQueue 3.10 - Echo Arena matchmaking from your hand tablet (Echo VR, EchoVRCE)
+EchoQueue 3.11 - Echo Arena matchmaking from your hand tablet (Echo VR, EchoVRCE)
 
 What it does
   A PLAY tab, first on the hand tablet's tab bar:

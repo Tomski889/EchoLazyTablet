@@ -51,6 +51,9 @@
 #include <cstring>
 #include <map>
 #include <mutex>
+#include <condition_variable>
+#include <deque>
+#include <thread>
 #include <set>
 #include <string>
 #include <vector>
@@ -194,7 +197,9 @@ PostEvent postEventOriginal = nullptr;
 Show showFn; Text textFn; Alpha alphaFn; Mask enableFn, disableFn;
 
 // Redraw counters for the perf line in the log (each of these makes the tablet redraw).
-struct Perf { std::atomic<U> show{0}, text{0}, alpha{0}, mask{0}, ticks{0}, ns{0}; } perf;
+// Also EchoQueue's own time in the per-frame and per-sound hooks.
+struct Perf { std::atomic<U> show{0}, text{0}, alpha{0}, mask{0}, ticks{0}, ns{0}, hookNs{0}, frames{0}, soundNs{0}, sounds{0}; } perf;
+U qpcNs();
 U show(void* c, unsigned e, int v) { perf.show++; return showFn(c, e, v); }
 U text(void* c, unsigned e, const char* s) { perf.text++; return textFn(c, e, s); }
 U alpha(void* c, float a) { perf.alpha++; return alphaFn(c, a); }
@@ -248,15 +253,43 @@ std::atomic<U> secondsToday{0};      // time played today (see updateToday), for
 std::atomic<U> lastWaitMs{0};
 bool joinSent = false;
 
+// Log lines are written by a thread of their own: opening the log (which antivirus scans on
+// every close) on Echo's game or render thread cost frames.
+std::condition_variable logWake;
+std::deque<std::string> logQueue;
+
+void logWriter() {
+    std::wstring path = dir + L"\\EchoQueue.log";
+    for (;;) {
+        std::deque<std::string> lines;
+        {
+            std::unique_lock<std::mutex> lock(logMutex);
+            logWake.wait(lock, [] { return !logQueue.empty(); });
+            lines.swap(logQueue);
+        }
+        if (FILE* f = _wfopen(path.c_str(), L"a")) {
+            for (auto& l : lines) fputs(l.c_str(), f);
+            fclose(f);
+        }
+        Sleep(250);  // gather a burst into one write
+    }
+}
+
 void logf(const char* format, ...) {
     char line[1024];
     va_list args;
     va_start(args, format);
     vsnprintf(line, sizeof line, format, args);
     va_end(args);
-    std::lock_guard<std::mutex> lock(logMutex);
-    std::wstring path = dir + L"\\EchoQueue.log";
-    if (FILE* f = _wfopen(path.c_str(), L"a")) { fprintf(f, "%llu %s\n", GetTickCount64(), line); fclose(f); }
+    static std::once_flag started;
+    std::call_once(started, [] { std::thread(logWriter).detach(); });
+    char stamped[1100];
+    snprintf(stamped, sizeof stamped, "%llu %s\n", GetTickCount64(), line);
+    {
+        std::lock_guard<std::mutex> lock(logMutex);
+        if (logQueue.size() < 2000) logQueue.emplace_back(stamped);
+    }
+    logWake.notify_one();
 }
 
 bool readable(const void* p, size_t n) {
@@ -398,6 +431,7 @@ void learnJoiningMatch(uint32_t id) {
 
 uint32_t postEventDetour(uint32_t id, U object, uint32_t flags, void* callback, void* cookie, uint32_t externals,
                          void* external, uint32_t playing) {
+    U t0 = qpcNs();
     if ((id == SOUND_CLICK || id == SOUND_TOGGLE_ON || id == SOUND_TOGGLE_OFF) && tabletObject.exchange(object) != object)
         logf("sound: the tablet's sound object is %llx", object);
     if ((id == VOICE_FINDING_MATCH || id == VOICE_MATCHMAKING_CANCELLED) && announcerObject.exchange(object) != object)
@@ -406,6 +440,8 @@ uint32_t postEventDetour(uint32_t id, U object, uint32_t flags, void* callback, 
         if (GetTickCount64() < learnJoiningUntil) learnJoiningMatch(id);
         else { lastAnnouncerEvent = id; lastAnnouncerEventAt = GetTickCount64(); }
     }
+    perf.soundNs += qpcNs() - t0;  // ours only, not Wwise's
+    perf.sounds++;
     return postEventOriginal(id, object, flags, callback, cookie, externals, external, playing);
 }
 
@@ -794,6 +830,7 @@ void logLayers(void* const* layers, unsigned count) {
 // Echo's render thread, every frame it shows in the headset (ovr_EndFrame and
 // ovr_SubmitFrame2 take the same arguments).
 int submitFrame(SubmitFrame2 original, void* session, long long frame, const void* scale, void* const* layers, unsigned count) {
+    U t0 = qpcNs();
     if (layers) logLayers(layers, count);
     U now = GetTickCount64();
     // Loading the level (Echo's own loading screen from here): fade back in. Any change isn't
@@ -814,6 +851,8 @@ int submitFrame(SubmitFrame2 original, void* session, long long frame, const voi
     float alpha = fadeAlpha(now);
     // During the delay (nothing showing yet): make the fade layer now, not on the first faded frame.
     if (alpha <= 0.f && fadeStartedAt && count && layers) quad::make(session, layers, count);
+    perf.hookNs += qpcNs() - t0;  // ours, before the runtime's submit
+    perf.frames++;
     if (alpha <= 0.f || !count || !layers || count >= 16) return original(session, frame, scale, layers, count);
     blackFrames++;
     void* list[16] = {};
@@ -1260,7 +1299,7 @@ DWORD WINAPI playersWatch(LPVOID) {
 // sends the account's ID and display name from the saved profile (xplatformid, displayname)
 // and gets back blocked or not. The answer is kept in EchoQueue.ini ([access] blocked) for
 // when the service can't be reached; with no answer ever, EchoQueue stays on.
-constexpr const char* ECHOQUEUE_VERSION = "3.10";
+constexpr const char* ECHOQUEUE_VERSION = "3.11";
 constexpr const wchar_t* ACCESS_HOST = L"echoqueue.dokuyegar.workers.dev";  // the deployed Worker (server/worker.js)
 constexpr U ACCESS_EVERY_MS = 15 * 60 * 1000;
 
@@ -1341,8 +1380,14 @@ DWORD WINAPI accessWatch(LPVOID) {
 // Own thread, ten times a second: adds the time played to today's every 10 s, and while the
 // net game is "in game" (a match or the social lobby, which the API doesn't report) asks the
 // API until it reports a match, which sets inMatch for the LOBBY button.
+// Echo answers its API on its own threads, so asking costs it frame time: it's only asked for
+// API_ASK_MS after each arrival (a match reports itself within a second or two; no answer that
+// long means the social lobby, or API access off), not for as long as the lobby lasts.
+constexpr U API_ASK_MS = 20000;
+
 DWORD WINAPI matchWatch(LPVOID) {
     bool counted = false, apiDown = false, apiSeen = false;
+    U inGameSince = 0;
     U creditedAt = GetTickCount64();
     std::string body;
     for (;;) {
@@ -1364,8 +1409,9 @@ DWORD WINAPI matchWatch(LPVOID) {
             logf("loading: %s", loadedKind == KIND_PUBLIC ? "a public Echo Arena match" : loadedKind == KIND_OTHER ? "a private match or other mode" : "not from a search (the lobby?)");
         }
         lastState = netState;
-        if (netState != NETGAME_IN_GAME) { counted = inMatch = false; matchPublic = -1; continue; }
-        if (counted) continue;
+        if (netState != NETGAME_IN_GAME) { counted = inMatch = false; matchPublic = -1; inGameSince = 0; continue; }
+        if (!inGameSince) inGameSince = now;
+        if (counted || now - inGameSince > API_ASK_MS) continue;
         DWORD http = apiSession(body);
         if (!http) {  // also normal in the social lobby, so only worth a word if it never answered
             if (!apiDown && !apiSeen) logf("Echo's API (127.0.0.1:%u/session) isn't answering; is API access on in Echo's settings?", unsigned(API_PORT));
@@ -1756,18 +1802,21 @@ void perfReport() {
     static U last = 0;
     U now = GetTickCount64();
     if (!last) last = now;
-    if (now - last < 5000) return;
-    U secs = (now - last) / 1000;
+    if (now - last < 30000) return;
+    double secs = (now - last) / 1000.0;
     last = now;
     U s = perf.show.exchange(0), t = perf.text.exchange(0), a = perf.alpha.exchange(0), m = perf.mask.exchange(0);
     U ticks = perf.ticks.exchange(0), ns = perf.ns.exchange(0);
+    U frames = perf.frames.exchange(0), hookNs = perf.hookNs.exchange(0), sounds = perf.sounds.exchange(0), soundNs = perf.soundNs.exchange(0);
     bool page = false;
     for (auto& [gs, c] : contexts) page |= c.page == Page::Queue;
     U hk = nsHousekeeping.exchange(0), g = nsGate.exchange(0), r = nsRender.exchange(0);
-    if (page || s || t || a || m)
-        logf("perf: %llu updates/s, EchoQueue %.3f ms/s (housekeeping %.3f, buttons %.3f, page %.3f), per second: show %.1f text %.1f alpha %.1f masks %.1f (PLAY page %s)",
-             ticks / secs, ns / 1e6 / secs, hk / 1e6 / secs, g / 1e6 / secs, r / 1e6 / secs,
-             double(s) / secs, double(t) / secs, double(a) / secs, double(m) / secs, page ? "open" : "closed");
+    // Every 30 s: the headset frame rate, and EchoQueue's own time per second on Echo's threads.
+    logf("perf: headset %.1f fps; EchoQueue %.3f ms/s on Echo's threads (tablet %.3f: housekeeping %.3f, buttons %.3f, page %.3f; "
+         "frame hook %.3f; sound hook %.3f for %.0f sounds/s); tablet redraws/s: show %.1f text %.1f alpha %.1f masks %.1f; "
+         "%.0f tablet updates/s (PLAY page %s)",
+         frames / secs, (ns + hookNs + soundNs) / 1e6 / secs, ns / 1e6 / secs, hk / 1e6 / secs, g / 1e6 / secs, r / 1e6 / secs,
+         hookNs / 1e6 / secs, soundNs / 1e6 / secs, sounds / secs, s / secs, t / secs, a / secs, m / secs, ticks / secs, page ? "open" : "closed");
 }
 
 // Closes another mod's page (see Kick). Called without our lock held: the other mod's dispatch
@@ -2012,7 +2061,7 @@ void installTablet() {
 }
 
 void initialize() {
-    logf("EchoQueue v3.10 starting (pid %lu)", GetCurrentProcessId());
+    logf("EchoQueue v3.11 starting (pid %lu)", GetCurrentProcessId());
     if (!verifyExecutable()) { fault = tabletFault = true; logf("EchoQueue disabled"); return; }
     loadSettings();
     loadToday();

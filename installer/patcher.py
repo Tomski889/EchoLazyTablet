@@ -21,7 +21,7 @@ from pathlib import Path
 import echodata as E
 import tablet
 
-VERSION = '3.10'
+VERSION = '3.11'
 EXE_TIMESTAMP = 1683152886
 DATA = Path('_data/5932408047/rad15/win10')
 STOCK_PACKAGES = 3
@@ -166,12 +166,15 @@ def _ours(m, record):
         n = record['package']
         mine = {tuple(f) for f in record['frames']}
         frames = [i for i, f in enumerate(m.frames) if f[0] == n and tuple(f) in mine]
-        return (n, frames) if frames else (None, [])
-    # First installer (schema 1, or no record): a package holding only EchoQueue's resources.
+        if frames:
+            return n, frames
+    # First installer (schema 1, or no record), or another tool put back an older manifest with an
+    # earlier EchoQueue in it (seen: Echo Mods restoring its pre-rebuild copy): a package holding
+    # only EchoQueue's resources.
     for n in range(STOCK_PACKAGES, m.packages):
         frames = [i for i, f in enumerate(m.frames) if f[0] == n]
         users = {(e[0], e[1]) for e in m.entries if m.frames[e[2] & 0xFFFFFFFF][0] == n}
-        if frames and (tablet.CV, tablet.PAGE) in users and users <= OUR_RESOURCES:
+        if frames and users & {(tablet.CV, tablet.PAGE), (tablet.CV, tablet.OVERLAY)} and users <= OUR_RESOURCES:
             return n, frames
     return None, []
 
