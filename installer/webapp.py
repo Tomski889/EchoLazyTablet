@@ -9,6 +9,7 @@ import secrets
 import subprocess
 import sys
 import threading
+import time
 import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -17,6 +18,8 @@ from urllib.parse import urlparse
 import patcher
 
 TOKEN = secrets.token_urlsafe(24)
+BYE_AT = None             # when the page last said goodbye (closing, or reloading)
+LAST_SEEN = None          # when the window last called (it polls every 0.6 s)
 ISSUES = 'https://github.com/Tomski889/EchoQueue/issues/new'   # where Report a bug goes
 WEB = Path(getattr(sys, '_MEIPASS', Path(__file__).resolve().parent)) / 'web'
 TYPES = {'.html': 'text/html; charset=utf-8', '.css': 'text/css', '.js': 'application/javascript', '.svg': 'image/svg+xml'}
@@ -140,6 +143,10 @@ class Handler(BaseHTTPRequestHandler):
         self.send(200, file.read_bytes(), TYPES.get(file.suffix, 'application/octet-stream'))
 
     def do_POST(self):
+        if urlparse(self.path).path == '/api/bye' and urlparse(self.path).query == 't=' + TOKEN:
+            global BYE_AT
+            BYE_AT = time.monotonic()   # a beacon from the page as it goes (it can't send headers)
+            return self.send(200, {})
         length = int(self.headers.get('Content-Length') or 0)
         try:
             body = json.loads(self.rfile.read(length) or b'{}')
@@ -150,6 +157,8 @@ class Handler(BaseHTTPRequestHandler):
     def api(self, path, body):
         if self.headers.get('X-Token') != TOKEN:
             return self.send(403, {'error': 'forbidden'})
+        global LAST_SEEN
+        LAST_SEEN = time.monotonic()
         if path == '/api/state':
             return self.send(200, STATE.view())
         if path == '/api/rescan':
@@ -209,5 +218,20 @@ def run():
     profile.mkdir(parents=True, exist_ok=True)
     window = subprocess.Popen([browser, f'--app={url}', f'--user-data-dir={profile}', '--window-size=1000,780',
                                '--no-first-run', '--no-default-browser-check'])
-    window.wait()
+    # Edge may hand the window to an Edge already running with this profile (an earlier
+    # installer's window) and exit at once, so the window's own process says nothing about
+    # whether it's open: the installer stays while the page keeps calling, and closes when the
+    # page says goodbye as it closes, or 75 s after it stops calling (Edge slows the timers of
+    # minimised windows to about one a minute); 60 s for the first call, while Edge starts.
+    start = time.monotonic()
+    while True:
+        time.sleep(1)
+        seen = LAST_SEEN
+        if seen is None:
+            if time.monotonic() - start > 60:
+                break
+        # a goodbye with no call after it: closed, not reloaded
+        elif ((BYE_AT and seen < BYE_AT and time.monotonic() - BYE_AT > 2) or time.monotonic() - seen > 75) and not STATE.job['busy']:
+            break
+    window.poll()
     server.shutdown()

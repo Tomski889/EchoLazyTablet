@@ -181,3 +181,4 @@ $('admin').onclick = () => api('admin', {});
 refresh();
 setInterval(refresh, 600);
 $('bug').onclick = () => api('bug', {});
+window.addEventListener('pagehide', () => navigator.sendBeacon('/api/bye?t=' + encodeURIComponent(TOKEN)));
