@@ -1,0 +1,9 @@
+# personal dev notes and build output
+HANDOFF.md
+build/
+dist/
+installer/payload/
+installer/pydeps/
+__pycache__/
+*.pyc
+.claude/

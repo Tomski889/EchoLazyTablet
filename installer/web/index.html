@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>EchoQueue</title>
+<link rel="icon" href="disc.svg">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="glow g1"></div><div class="glow g2"></div>
+<main class="app">
+
+  <!-- left: the action -->
+  <section class="side">
+    <header class="brand">
+      <img class="logo" src="disc.svg" alt="">
+      <div>
+        <h1>EchoQueue</h1>
+        <p>Echo Arena matchmaking on your hand tablet</p>
+      </div>
+      <span class="version" id="version">v-</span>
+    </header>
+
+    <!-- main view -->
+    <div class="view" id="main">
+      <div class="headline">
+        <div class="state-icon" id="stateicon"></div>
+        <div>
+          <h2 id="title">Getting ready…</h2>
+          <p id="subtitle">Looking for Echo VR on this PC.</p>
+        </div>
+      </div>
+
+      <div class="pills" id="pills"></div>
+
+      <button class="cta" id="install" disabled>
+        <svg viewBox="0 0 24 24" class="cta-icon" id="ctaicon"><path d="M12 3v12m0 0l-5-5m5 5l5-5M4 19h16" /></svg>
+        <span id="ctatext">Install EchoQueue</span>
+      </button>
+      <div class="links">
+        <button class="link" id="uninstall" hidden>Uninstall</button>
+        <button class="link" id="detailsbtn">Details</button>
+        <button class="link" id="rescan">Check again</button>
+      </div>
+
+      <div class="details" id="details" hidden>
+        <div class="field">
+          <label>Echo VR folder</label>
+          <div class="folder">
+            <span id="path">—</span>
+            <button class="small" id="browse">Change</button>
+          </div>
+        </div>
+        <div class="field" id="modsfield" hidden>
+          <label>Other mods found</label>
+          <div class="chips" id="mods"></div>
+        </div>
+        <ul class="notes" id="notes"></ul>
+      </div>
+    </div>
+
+    <!-- progress view -->
+    <div class="view" id="progress" hidden>
+      <h2 id="ptitle">Installing EchoQueue</h2>
+      <p class="muted">Keep Echo VR closed for a moment.</p>
+      <div class="bar"><div class="fill" id="pfill"></div></div>
+      <ol class="steps" id="steps"></ol>
+    </div>
+
+    <!-- result view -->
+    <div class="view" id="result" hidden>
+      <div class="badge" id="rbadge">
+        <svg viewBox="0 0 52 52"><circle cx="26" cy="26" r="24"/><path id="rmark" d="M15 27l7 7 15-16"/></svg>
+      </div>
+      <h2 id="rtitle">All set!</h2>
+      <p id="rtext" class="muted"></p>
+      <details class="log"><summary>What happened</summary><ol id="log"></ol></details>
+      <div class="row">
+        <button class="cta slim" id="done">Done</button>
+        <button class="ghost" id="admin" hidden>Restart as administrator</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- right: what you get -->
+  <section class="show">
+    <div class="tablet">
+      <div class="screen">
+        <div class="strip"><span class="tab-title">PLAY</span><span class="sub">ARENA MATCHMAKING</span><span class="x">✕</span></div>
+        <div class="page">
+          <div class="card">
+            <img src="disc.svg" alt="" class="mini-disc">
+            <div><b>ECHO ARENA</b><i>PUBLIC MATCH</i></div>
+            <strong>READY</strong>
+          </div>
+          <div class="find">FIND MATCH</div>
+          <div class="boxes"><span>CREATE</span><span>⌂ GO</span><span>118</span></div>
+        </div>
+        <div class="tabbar" id="tabbar"></div>
+      </div>
+    </div>
+    <p class="caption" id="caption">Your tab bar, with PLAY added first.</p>
+
+    <div class="features">
+      <div class="feature"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="6"/><path d="M20 20l-4.5-4.5"/></svg><div><b>Find match</b><span>Queue for Echo Arena from the tablet</span></div></div>
+      <div class="feature"><svg viewBox="0 0 24 24"><rect x="5" y="10" width="14" height="10" rx="2"/><path d="M8 10V7a4 4 0 018 0v3"/></svg><div><b>Private match</b><span>Make your own match, instantly</span></div></div>
+      <div class="feature"><svg viewBox="0 0 24 24"><path d="M4 11l8-7 8 7v9H4z"/><path d="M10 20v-6h4v6"/></svg><div><b>Lobby</b><span>Back to the social lobby in one tap</span></div></div>
+      <div class="feature"><svg viewBox="0 0 24 24"><path d="M21 13A9 9 0 1111 3a7 7 0 0010 10z"/></svg><div><b>Smooth fade</b><span>Fades to black as you move</span></div></div>
+    </div>
+  </section>
+</main>
+
+<div class="modal" id="confirm" hidden>
+  <div class="dialog">
+    <h3 id="ctitle">Install EchoQueue?</h3>
+    <p id="ctext"></p>
+    <div class="row end">
+      <button class="ghost" id="cno">Cancel</button>
+      <button class="cta slim" id="cyes">Install</button>
+    </div>
+  </div>
+</div>
+<script src="app.js"></script>
+</body>
+</html>
