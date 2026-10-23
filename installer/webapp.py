@@ -1,6 +1,6 @@
 """The installer's window: a small local web server (127.0.0.1, random port) serving web/, shown in
-an Edge app window with a profile of its own (the same approach as Echo Mods); the installer
-exits when the window closes. Every API call must carry the random token from the window's URL,
+the installer's own window (pywebview on Windows' WebView2: no browser, no address bar); the
+installer exits when the window closes. Without WebView2 it falls back to an Edge app window. Every API call must carry the random token from the window's URL,
 so no other page in a browser can drive it."""
 import ctypes
 import json
@@ -16,6 +16,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 import patcher
+import player
 
 TOKEN = secrets.token_urlsafe(24)
 BYE_AT = None             # when the page last said goodbye (closing, or reloading)
@@ -33,10 +34,20 @@ class State:
         self.scan = None            # scan result for self.game
         self.scanning = False
         self.job = dict(busy=False, kind='', log=[], stage='', ok=None, message='', admin=False)
+        self.player, self.player_at = None, -1e9
 
     def view(self):
+        now = time.monotonic()
+        if now - self.player_at > 3:            # the tablet mock-up's pages: re-read every few seconds
+            info = player.info()
+            try:
+                info['people'] = player.people(self.game, me=info['name'], running=patcher.echo_running())
+            except Exception:
+                info['people'] = None
+            self.player, self.player_at = info, now
         with self.lock:
-            return dict(version=patcher.VERSION, game=self.game, scan=self.scan, scanning=self.scanning, job=dict(self.job))
+            return dict(version=patcher.VERSION, game=self.game, scan=self.scan, scanning=self.scanning, job=dict(self.job),
+                        player=self.player)
 
     def rescan(self):
         with self.lock:
@@ -99,8 +110,15 @@ class State:
 STATE = State()
 
 
+WINDOW = None             # the installer's own window (pywebview), once open
+
+
 def browse():
     """The Windows folder picker; -> chosen folder or ''."""
+    if WINDOW is not None:
+        import webview
+        picked = WINDOW.create_file_dialog(webview.FOLDER_DIALOG)
+        return picked[0] if picked else ''
     import tkinter
     from tkinter import filedialog
     root = tkinter.Tk()
@@ -180,6 +198,14 @@ class Handler(BaseHTTPRequestHandler):
         if path in ('/api/install', '/api/uninstall'):
             STATE.run(path.rsplit('/', 1)[1])
             return self.send(200, STATE.view())
+        if path == '/api/launch':
+            try:
+                patcher.launch(patcher.Game(STATE.game))
+                return self.send(200, {'ok': True})
+            except patcher.InstallError as e:
+                return self.send(200, {'ok': False, 'message': str(e)})
+            except OSError as e:
+                return self.send(200, {'ok': False, 'message': f"Couldn't start Echo VR: {e.strerror or e}"})
         if path == '/api/bug':
             import webbrowser
             from urllib.parse import urlencode
@@ -201,6 +227,28 @@ def edge():
     return None
 
 
+def own_window(url):
+    """Shows the page in the installer's own window until it's closed. -> False if it can't
+    (no WebView2 on this PC), for the Edge fallback."""
+    global WINDOW
+    try:
+        import webview
+    except Exception:
+        return False
+    try:
+        WINDOW = webview.create_window('EchoQueue', url, width=1000, height=780, min_size=(760, 600),
+                                       background_color='#070a10')
+        webview.start(gui='edgechromium', private_mode=True)
+        return True
+    except Exception:
+        WINDOW = None
+        return False
+    finally:
+        if STATE.job['busy']:     # closed mid-install: let it finish before exiting
+            while STATE.job['busy']:
+                time.sleep(.5)
+
+
 def run():
     server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
     url = f'http://127.0.0.1:{server.server_address[1]}/#{TOKEN}'
@@ -209,6 +257,9 @@ def run():
     if os.environ.get('ECHOQUEUE_NO_WINDOW'):   # tests: serve only, print where
         print(url, flush=True)
         threading.Event().wait()
+    if own_window(url):
+        server.shutdown()
+        return
     browser = edge()
     if not browser:                             # no Edge: the default browser; the installer stays until closed
         import webbrowser

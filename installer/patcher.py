@@ -21,7 +21,7 @@ from pathlib import Path
 import echodata as E
 import tablet
 
-VERSION = '3.9'
+VERSION = '3.10'
 EXE_TIMESTAMP = 1683152886
 DATA = Path('_data/5932408047/rad15/win10')
 STOCK_PACKAGES = 3
@@ -450,6 +450,18 @@ def install(game, log=print, stage=_no_stage):
     echomods_keep(game, True, log)
     log(f"Installed EchoQueue v{VERSION}: PLAY tab added to package _{number}, {built['tabs']} tabs on the bar.")
     return built
+
+
+def launch(game):
+    """Start Echo VR (bin\\win10\\echovr.exe, from its own folder), as its shortcut would."""
+    import subprocess
+    if echo_running():
+        raise InstallError('Echo VR is already running.')
+    exe = game.bin / 'echovr.exe'
+    if not exe.is_file():
+        raise InstallError("Echo VR isn't in this folder.")
+    subprocess.Popen([str(exe)], cwd=str(game.bin), close_fds=True,
+                     creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP)
 
 
 def uninstall(game, log=print, stage=_no_stage):

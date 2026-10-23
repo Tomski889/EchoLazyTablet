@@ -3,7 +3,8 @@
     python installer/build.py
 
 The installer bundles: EchoQueue.dll and the default EchoQueue.ini (payload/), this folder's
-Python code, Pillow, python-zstandard and texture2ddecoder (pydeps/), and Python itself.
+Python code, Pillow, python-zstandard, texture2ddecoder and pywebview (its own window, on
+Windows' WebView2) with pythonnet (pydeps/), and Python itself.
 THIRD_PARTY_NOTICES.txt goes inside it and next to it.
 """
 import shutil
@@ -17,15 +18,24 @@ PAYLOAD = HERE / 'payload'
 DEPS = HERE / 'pydeps'
 
 
-def notices():
-    parts = [('EchoQueue', 'EchoQueue and its installer: by the EchoQueue author. The tablet art is drawn at install time '
-                           "from the player's own copy of Echo VR; no game files are included.")]
-    sources = [('MinHook (in EchoQueue.dll)', ROOT / 'vendor/minhook/LICENSE.txt'),
-               ('Pillow', DEPS / 'pillow-11.3.0.dist-info/licenses/LICENSE'),
-               ('python-zstandard (includes Zstandard)', DEPS / 'zstandard-0.25.0.dist-info/licenses/LICENSE'),
-               ('texture2ddecoder', DEPS / 'texture2ddecoder-1.0.5.dist-info/LICENSE'),
-               ('Python', Path(sys.base_prefix) / 'LICENSE.txt'),
-               ('Tcl/Tk (one licence for both)', Path(sys.base_prefix) / 'tcl/tk8.6/license.terms')]
+# The window: pywebview and what it runs on.
+WINDOW_LICENCES = [('pywebview', DEPS / 'pywebview-5.4.dist-info/LICENSE'),
+                   ('pythonnet', DEPS / 'pythonnet-3.2.1.dist-info/licenses/LICENSE'),
+                   ('clr_loader', DEPS / 'clr_loader-0.3.1.dist-info/licenses/LICENSE'),
+                   ('bottle', DEPS / 'bottle-0.13.4.dist-info/licenses/LICENSE'),
+                   ('cffi', DEPS / 'cffi-2.1.1.dist-info/licenses/LICENSE'),
+                   ('pycparser', DEPS / 'pycparser-3.12.dist-info/licenses/LICENSE'),
+                   ('typing_extensions', DEPS / 'typing_extensions-4.16.0.dist-info/licenses/LICENSE')]
+WINDOW_NOTES = [('proxy_tools', 'proxy_tools 0.1.0 (used by pywebview): MIT licence, as its package metadata states; '
+                                'it ships no licence file.'),
+                ('Microsoft WebView2 SDK (in pywebview)', 'Microsoft.Web.WebView2.Core.dll and Microsoft.Web.WebView2.WinForms.dll: '
+                 'Copyright (C) Microsoft Corporation, under the WebView2 SDK licence '
+                 '(https://www.nuget.org/packages/Microsoft.Web.WebView2/, "License" link). The WebView2 '
+                 'Runtime itself is part of Windows and is not included.')]
+
+
+def notices(first, sources, notes=()):
+    parts = [first, *notes]
     for name, path in sources:
         if not path.exists():
             raise SystemExit(f'Licence for {name} not found at {path}')
@@ -53,7 +63,16 @@ def main():
     PAYLOAD.mkdir()
     shutil.copy2(dll, PAYLOAD / 'EchoQueue.dll')
     shutil.copy2(ROOT / 'EchoQueue.ini', PAYLOAD / 'EchoQueue.ini')
-    text = notices()
+    text = notices(('EchoQueue', 'EchoQueue and its installer: by the EchoQueue author. The tablet art is drawn at install time '
+                                 "from the player's own copy of Echo VR; no game files are included."),
+                   [('MinHook (in EchoQueue.dll)', ROOT / 'vendor/minhook/LICENSE.txt'),
+                    ('Pillow', DEPS / 'pillow-11.3.0.dist-info/licenses/LICENSE'),
+                    ('python-zstandard (includes Zstandard)', DEPS / 'zstandard-0.25.0.dist-info/licenses/LICENSE'),
+                    ('texture2ddecoder', DEPS / 'texture2ddecoder-1.0.5.dist-info/LICENSE'),
+                    *WINDOW_LICENCES,
+                    ('Python', Path(sys.base_prefix) / 'LICENSE.txt'),
+                    ('Tcl/Tk (one licence for both)', Path(sys.base_prefix) / 'tcl/tk8.6/license.terms')],
+                   WINDOW_NOTES)
     (PAYLOAD / 'THIRD_PARTY_NOTICES.txt').write_text(text, encoding='utf-8')
     work = ROOT / 'build/installer'
     work.mkdir(parents=True, exist_ok=True)
@@ -64,7 +83,7 @@ def main():
                            '--hidden-import', 'zstandard.backend_c', '--hidden-import', 'texture2ddecoder',
                            '--add-data', f'{PAYLOAD};payload', '--add-data', f'{HERE / "web"};web',
                            '--distpath', str(ROOT / 'dist'), '--workpath', str(work), '--specpath', str(work),
-                           '--hidden-import', 'webapp', str(HERE / 'app.py')])
+                           '--hidden-import', 'webapp', '--hidden-import', 'webview', str(HERE / 'app.py')])
     (ROOT / 'dist/THIRD_PARTY_NOTICES.txt').write_text(text, encoding='utf-8')
     shutil.copy2(ROOT / 'README.txt', ROOT / 'dist/README.txt')
     print('built', ROOT / 'dist/EchoQueueInstaller.exe')

@@ -97,24 +97,160 @@ function renderMain(v) {
   $('change').disabled = busy;
 }
 
+// The tablet mock-up: the player's real tab bar; each tab shows that page with their own data.
+const STOCK_PAGES = ['home', 'lobby', 'party', 'friends'];   // the stock tabs, left to right
+const PAGE_ICONS = {
+  bubble: '<svg viewBox="0 0 40 40"><circle cx="20" cy="20" r="13"/><circle cx="20" cy="20" r="6"/><path d="M8 32L32 8"/></svg>',
+  mute: '<svg viewBox="0 0 40 40"><path d="M9 15h5l7-6v16l-7-6H9z"/><path d="M25 12a7 7 0 010 10"/><circle cx="12" cy="31" r="2.5"/><circle cx="20" cy="31" r="2.5"/><circle cx="28" cy="31" r="2.5"/></svg>',
+  ghost: '<svg viewBox="0 0 40 40"><circle cx="20" cy="20" r="5"/><path d="M20 6v6M20 28v6M6 20h6M28 20h6M10 10l4 4M26 26l4 4M30 10l-4 4M14 26l-4 4"/></svg>',
+  person: '<svg viewBox="0 0 40 40"><circle cx="18" cy="15" r="7"/><path d="M6 33c2-7 7-10 12-10s10 3 12 10"/><path d="M28 26h8M28 30h8"/></svg>',
+};
+let selected = null;   // index into the preview's tabs; null = PLAY
+let launchNote = null;  // the PLAY page's launch button after a press: {text, ok, until}
+
+// The READY spot on the PLAY page opens Echo VR.
+function launchState() {
+  const s = view && view.scan;
+  const running = /running/.test(s && s.problems ? s.problems.join(' ') : '');
+  const note = launchNote && Date.now() < launchNote.until ? launchNote : null;
+  if (note) return { label: note.ok ? 'STARTING' : 'OOPS', hint: note.text, off: true, bad: !note.ok };
+  if (running) return { label: 'RUNNING', hint: 'ECHO VR IS OPEN', off: true };
+  if (!view || !view.game || (s && s.found === false)) return { label: 'READY', hint: 'FIND ECHO VR FIRST', off: true };
+  return { label: 'READY', hint: 'OPEN ECHO VR', off: false };
+}
+
+function launchButton() {
+  const st = launchState();
+  const b = el('button', 'launchbtn' + (st.off ? ' off' : '') + (st.bad ? ' bad' : ''));
+  b.type = 'button';
+  b.disabled = st.off;
+  b.title = st.off ? st.hint : 'Open Echo VR';
+  b.append(el('strong', '', st.label));
+  const hint = el('span');
+  if (!st.off) hint.append(html('i', '', '<svg viewBox="0 0 24 24"><path d="M7 4.5v15l12-7.5z"/></svg>'));
+  hint.append(st.hint);
+  b.append(hint);
+  b.onclick = launchEcho;
+  return b;
+}
+
+async function launchEcho() {
+  launchNote = { ok: true, text: 'OPENING ECHO VR…', until: Date.now() + 15000 };
+  renderTablet(view);
+  const r = await api('launch', {});
+  launchNote = r.ok ? { ok: true, text: 'ECHO VR IS OPENING', until: Date.now() + 8000 }
+                    : { ok: false, text: (r.message || "Couldn't open Echo VR").toUpperCase(), until: Date.now() + 6000 };
+  renderTablet(view);
+}
+
+// FIND MATCH opens Echo VR too (the search itself is pressed in the game).
+function findButton() {
+  const st = launchState();
+  const b = el('button', 'find' + (st.off ? ' off' : ''));
+  b.type = 'button';
+  b.disabled = st.off;
+  b.title = st.off ? st.hint : 'Open Echo VR';
+  b.append(el('b', '', 'FIND MATCH'));
+  b.onclick = launchEcho;
+  return b;
+}
+
+function pageKinds(preview) {
+  let stock = 0;
+  return preview.map((t) => (t.ours ? 'play' : t.stock ? (STOCK_PAGES[stock++] || 'stock') : 'other'));
+}
+
+function html(tag, cls, inner) { const e = el(tag, cls); e.innerHTML = inner; return e; }
+
+function onOff(label, icon, on) {
+  const box = el('div', 'hbox');
+  box.append(el('small', '', label), html('div', 'hicon' + (on ? ' on' : ''), PAGE_ICONS[icon]),
+             el('em', on ? 'on' : '', on == null ? '—' : on ? 'ON' : 'OFF'));
+  return box;
+}
+
+function peopleList(rows) {
+  const list = el('div', 'plist');
+  for (const [who, status] of rows) {
+    const r = el('div', 'lrow');
+    const words = el('div'); words.append(el('b', '', who), el('span', '', status));
+    r.append(words, html('div', 'licon', PAGE_ICONS.person));
+    list.append(r);
+  }
+  return list;
+}
+
+function message(text) { const m = el('div', 'tmsg'); m.append(el('span', '', text)); return m; }
+
+function renderPage(kind, tab, p) {
+  const page = $('tpage');
+  page.className = 'page ' + kind;
+  const name = (p && p.name) || 'YOU';
+  const heading = (title, sub) => { $('ttitle').textContent = title; $('tsub').textContent = sub || ''; };
+  if (kind === 'play') {
+    heading('PLAY', 'ARENA MATCHMAKING');
+    const card = el('div', 'card');
+    const img = el('img', 'mini-disc'); img.src = 'disc.svg'; img.alt = '';
+    const words = el('div'); words.append(el('b', '', 'ECHO ARENA'), el('i', '', 'PUBLIC MATCH'));
+    card.append(img, words, launchButton());
+    const boxes = el('div', 'boxes');
+    for (const [label, value] of [['PRIVATE MATCH', 'CREATE'], ['LOBBY', '⌂ GO'], ['MATCHES OVERALL', p && p.matches != null ? String(p.matches) : '—']]) {
+      const b = el('div'); b.append(el('small', '', label), el('span', '', value)); boxes.append(b);
+    }
+    page.replaceChildren(card, findButton(), boxes);
+  } else if (kind === 'home') {
+    heading(name);
+    const level = el('div', 'hbox');
+    level.append(el('small', '', 'ARENA LEVEL'), el('b', 'level', p && p.level != null ? String(p.level) : '—'));
+    const row = el('div', 'hrow');
+    row.append(level, onOff('PERSONAL BUBBLE', 'bubble', p && p.bubble), onOff('MUTE ALL', 'mute', p && p.mute), onOff('GHOST ALL', 'ghost', p && p.ghost));
+    page.replaceChildren(el('div', 'banner'), row);
+  } else if (kind === 'lobby') {
+    // Who's in your session, from the game's logs: right now while Echo is open, otherwise the last one.
+    const ppl = p && p.people;
+    const list = ppl && ppl.lobby.length ? ppl.lobby : [{ name, spectator: false }];
+    const when = ppl && ppl.at ? new Date(ppl.at * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '';
+    heading('LOBBY', ppl && ppl.live ? 'RIGHT NOW' : when ? 'LAST SESSION · ' + when : '');
+    page.replaceChildren(peopleList(list.map((x) => [x.name, x.spectator ? 'Spectating' : ppl && ppl.live ? 'Online' : 'Was here'])));
+  } else if (kind === 'party') {
+    heading('PARTY');
+    page.replaceChildren(message('Invite players to start a party.'));
+  } else if (kind === 'friends') {
+    // Echo can't see Meta friends; the people you played with lately stand in.
+    const recent = (p && p.people && p.people.recent) || [];
+    heading('FRIENDS', recent.length ? 'PLAYED WITH RECENTLY' : '');
+    page.replaceChildren(recent.length ? peopleList(recent.map((n) => [n, 'Recent player'])) : message('You have no Oculus Friends.'));
+  } else {
+    heading((tab && tab.text) || 'MOD', 'FROM ANOTHER MOD');
+    page.replaceChildren(message('This tab comes from another mod. It works as usual in Echo VR, next to PLAY.'));
+  }
+}
+
 function renderTablet(v) {
   const s = v.scan;
-  const key = s && s.preview ? s.preview.map((t) => (t.png || t.text || '').slice(-24)).join('|') : '';
+  const p = v.player || null;
+  const preview = s && s.preview ? s.preview : [];
+  const kinds = pageKinds(preview);
+  const at = selected != null && selected < preview.length ? selected : Math.max(0, kinds.indexOf('play'));
+  const key = preview.map((t) => (t.png || t.text || '').slice(-24)).join('|') + '#' + at + '#' + JSON.stringify(p) + '#' + JSON.stringify(launchState());
   if (key === previewKey) return;
   previewKey = key;
+  renderPage(preview.length ? kinds[at] : 'play', preview[at], p);
   const bar = $('tabbar');
   bar.replaceChildren();
-  if (!s || !s.preview) return;
   let others = 0;
-  for (const t of s.preview) {
-    const tab = el('div', 't' + (t.ours ? ' ours' : t.stock ? '' : ' other'));
+  preview.forEach((t, i) => {
+    const tab = el('button', 't' + (t.ours ? ' ours' : t.stock ? '' : ' other') + (i === at ? ' sel' : ''));
+    tab.type = 'button';
+    tab.title = { play: 'PLAY', home: 'Home', lobby: 'Lobby', party: 'Party', friends: 'Friends' }[kinds[i]] || 'Another mod';
     if (t.png) { const img = el('img'); img.src = t.png; img.alt = ''; tab.append(img); } else tab.textContent = (t.text || 'TAB').slice(0, 6);
+    tab.onclick = () => { selected = i; renderTablet(view); };
     if (!t.ours && !t.stock) others++;
     bar.append(tab);
-  }
-  $('caption').textContent = others
+  });
+  $('caption').textContent = (others
     ? `Your tab bar, with PLAY added first. ${others} tab${others > 1 ? 's' : ''} from another mod (dashed) keep${others > 1 ? '' : 's'} working.`
-    : 'Your tab bar, with PLAY added first.';
+    : 'Your tab bar, with PLAY added first.') + (preview.length ? ' Tap a tab to see your page.' : '');
 }
 
 function renderJob(v) {

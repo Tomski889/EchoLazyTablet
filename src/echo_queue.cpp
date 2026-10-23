@@ -119,6 +119,12 @@ constexpr U ANNOUNCER_SOUND_OBJECT = 0x166;
 constexpr U PRESS = 0xfdb213d9dc5e4826, RELEASE = 0xd7ded077f321f69b;
 constexpr U TABLET_ACTOR = 0x6c1f6ff04e070923;
 constexpr U STOCK_TAB_FIRST = 0x275876572b742791, STOCK_TAB_LAST = 0x275876572b742794;
+// Echo Arcade's ARCADE and SETTINGS tabs (kotorvr/echo-arcade, native/generated/arcade_tab.h):
+// pressing one opens its page over ours. Other mods' tabs come from EchoQueue.layout's other_tabs.
+constexpr U ECHO_ARCADE_TABS[] = {0xc5a79e9d89b4bc0f, 0x51a014bc63ecbedb};
+// The disable bit EchoQueue sets on buttons. Echo Arcade (and Doom-on-EchoVR) own 0x8000, so
+// sharing it made whichever mod came second find it "taken" and switch itself off.
+constexpr unsigned short MASK_BIT = 0x4000;
 constexpr U CONTENT[] = {0x5071f3ac46630320, 0x645c2234c519a275, 0x645c2234c519a276, 0x645c2234c519a277,
     0x6567539d25efbdc0, 0xfc4ee470b38fb49d, 0xfc4ee470b38fb49e, 0xfc4ee470b38fb49f,
     0x2755735736742790, 0x2755735736742791, 0x2755735736742792, 0x2755735736742793,
@@ -212,6 +218,20 @@ WNDPROC windowOriginal = nullptr;
 // In a match (not the social lobby), as Echo's API reports it (matchWatch): what the LOBBY
 // button leaves.
 std::atomic<bool> inMatch{false};
+
+// Whether the match we're in is a public one, where queueing again would walk out on your
+// team: no FIND MATCH or PRIVATE MATCH there (private matches are fine). Echo's API says so
+// when it answers (matchPublic, matchWatch); without it, what the last search that turned into
+// a join asked for (loadedKind): a public Echo Arena search counts as public. A load no search
+// led to (back to the social lobby) is unknown, which doesn't block.
+enum { KIND_UNKNOWN, KIND_PUBLIC, KIND_OTHER };
+std::atomic<int> matchPublic{-1};     // API: 1 public match, 0 private match or lobby, -1 no answer
+std::atomic<int> searchKind{KIND_UNKNOWN}, loadedKind{KIND_UNKNOWN};
+std::atomic<U> matchmakingSeenAt{0};  // when the lobby was last seen searching / joining
+
+// EchoQueue turned off for this Echo account by its author (the access service, accessWatch):
+// no searches, private matches or LOBBY.
+std::atomic<bool> accessBlocked{false};
 
 // What the stats box shows; tapping it steps to the next ([stats] show in EchoQueue.ini).
 enum { STAT_TODAY, STAT_OVERALL, STAT_PLAYERS, STAT_MODES };
@@ -344,6 +364,7 @@ void findDetour(void* netgame, FindParams* p) {
                  window ? GetWindowThreadProcessId(window, nullptr) : 0);
         describe("game asked for a match", netgame, p);
         ourSearch = false;  // the menu's own search: the menu joins it
+        searchKind = p->gametype == ECHO_ARENA && p->access == 0 ? KIND_PUBLIC : KIND_OTHER;
         if (p->gametype == ECHO_ARENA && p->access == 0) {
             captured = *p;
             haveCaptured = true;
@@ -422,7 +443,15 @@ int lobbyState() {
 
 bool matchmaking(int state) { return state >= 3 && state <= 8; }
 
-enum class Queued { Started, AlreadySearching, NotReady, WrongThread, None };
+// In a public match, by the API or else by the search that led here (see matchPublic).
+bool inPublicMatch() {
+    void* netgame = netGame();
+    if (!netgame || at<int>(netgame, NETGAME_STATE) != NETGAME_IN_GAME) return false;
+    int api = matchPublic;
+    return api == 1 || (api < 0 && loadedKind == KIND_PUBLIC);
+}
+
+enum class Queued { Started, AlreadySearching, NotReady, WrongThread, PublicMatch, Blocked, None };
 
 // A new private Echo Arena match, as the CreateMatch node asks for one: the server puts it
 // on a game server of its choosing (it has the client's pings from every search).
@@ -469,6 +498,7 @@ bool createOnServer(void* netgame, int index) {
 // `createPrivate`: create a private match instead of searching for a public one.
 Queued queueNow(bool createPrivate = false) {
     DWORD thread = GetCurrentThreadId();
+    if (accessBlocked) { logf("queue: EchoQueue is turned off for this account"); return Queued::Blocked; }
     if (gameThread != 0 && gameThread != thread) { logf("queue: thread %lu isn't the game's thread %lu; not queueing (send this log)", thread, DWORD(gameThread)); return Queued::WrongThread; }
     void* netgame = netGame();
     if (!netgame) { logf("queue: the game isn't ready (no net game yet)"); return Queued::NotReady; }
@@ -476,7 +506,9 @@ Queued queueNow(bool createPrivate = false) {
     int state = lobbyState();
     if (state < 0) { logf("queue: no client lobby yet"); return Queued::NotReady; }
     if (matchmaking(state)) { logf("queue: already matchmaking (lobby state %d); not starting over", state); return Queued::AlreadySearching; }
+    if (inPublicMatch()) { logf("queue: in a public match; not leaving the team for another one"); return Queued::PublicMatch; }
     logf("queue: lobby state %d, thread %lu", state, thread);
+    searchKind = createPrivate ? KIND_OTHER : KIND_PUBLIC;
     if (createPrivate) {
         privateTry = -1;
         if (!privateIp) {
@@ -1016,6 +1048,15 @@ DWORD apiSession(std::string& body) {
     return status;
 }
 
+// The true/false value of "key" in a flat JSON body: 1, 0, or -1 when it isn't there.
+int jsonBool(const std::string& body, const char* key) {
+    size_t i = body.find("\"" + std::string(key) + "\"");
+    if (i == std::string::npos) return -1;
+    i = body.find_first_not_of(" \t\r\n:", i + strlen(key) + 2);
+    if (i == std::string::npos) return -1;
+    return body.compare(i, 4, "true") == 0 ? 1 : body.compare(i, 5, "false") == 0 ? 0 : -1;
+}
+
 // The string value of "key" in a flat JSON body, or "" (enough for game_status / match_type).
 std::string jsonString(const std::string& body, const char* key) {
     size_t i = body.find("\"" + std::string(key) + "\"");
@@ -1213,6 +1254,90 @@ DWORD WINAPI playersWatch(LPVOID) {
     }
 }
 
+// ---- access ----
+// Whether EchoQueue may be used on this Echo account, as its author's access service says
+// (server/worker.js). On its own thread: shortly after Echo starts and every 15 minutes it
+// sends the account's ID and display name from the saved profile (xplatformid, displayname)
+// and gets back blocked or not. The answer is kept in EchoQueue.ini ([access] blocked) for
+// when the service can't be reached; with no answer ever, EchoQueue stays on.
+constexpr const char* ECHOQUEUE_VERSION = "3.10";
+constexpr const wchar_t* ACCESS_HOST = L"echoqueue.dokuyegar.workers.dev";  // the deployed Worker (server/worker.js)
+constexpr U ACCESS_EVERY_MS = 15 * 60 * 1000;
+
+std::string jsonEscape(const std::string& s) {
+    std::string out;
+    for (unsigned char ch : s) {
+        if (ch == '"' || ch == '\\') { out += '\\'; out += char(ch); }
+        else if (ch < 0x20) { char b[8]; snprintf(b, sizeof b, "\\u%04x", ch); out += b; }
+        else out += char(ch);
+    }
+    return out;
+}
+
+// 1 blocked, 0 allowed, -1 no answer.
+int checkIn(const std::wstring& host, const std::string& id, const std::string& name) {
+    HINTERNET session = WinHttpOpen(L"EchoQueue", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+    if (!session) return -1;
+    WinHttpSetTimeouts(session, 5000, 5000, 5000, 10000);
+    HINTERNET connection = WinHttpConnect(session, host.c_str(), INTERNET_DEFAULT_HTTPS_PORT, 0);
+    HINTERNET request = connection ? WinHttpOpenRequest(connection, L"POST", L"/checkin", nullptr, WINHTTP_NO_REFERER,
+                                                        WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE) : nullptr;
+    std::string payload = "{\"id\":\"" + jsonEscape(id) + "\",\"name\":\"" + jsonEscape(name) + "\",\"version\":\"" + ECHOQUEUE_VERSION + "\"}";
+    DWORD status = 0, size = sizeof status;
+    std::string body;
+    if (request && WinHttpSendRequest(request, L"Content-Type: application/json\r\n", DWORD(-1), payload.data(), DWORD(payload.size()), DWORD(payload.size()), 0) &&
+        WinHttpReceiveResponse(request, nullptr) &&
+        WinHttpQueryHeaders(request, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_HEADER_NAME_BY_INDEX, &status, &size, WINHTTP_NO_HEADER_INDEX) &&
+        status == 200) {
+        char buffer[1024];
+        DWORD read = 0;
+        while (body.size() < 4096 && WinHttpReadData(request, buffer, sizeof buffer, &read) && read) body.append(buffer, read);
+    }
+    if (request) WinHttpCloseHandle(request);
+    if (connection) WinHttpCloseHandle(connection);
+    WinHttpCloseHandle(session);
+    int blocked = jsonBool(body, "blocked");
+    if (blocked < 0) logf("access: no answer from %ls (HTTP %lu)", host.c_str(), status);
+    return blocked;
+}
+
+// The account's ID and display name from the newest saved profile.
+bool readIdentity(std::string& id, std::string& name) {
+    std::wstring path = profilePath();
+    HANDLE f = path.empty() ? INVALID_HANDLE_VALUE
+                            : CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, 0, nullptr);
+    if (f == INVALID_HANDLE_VALUE) return false;
+    std::string profile;
+    char buffer[8192];
+    DWORD read = 0;
+    while (ReadFile(f, buffer, sizeof buffer, &read, nullptr) && read) profile.append(buffer, read);
+    CloseHandle(f);
+    id = jsonString(profile, "xplatformid");
+    name = jsonString(profile, "displayname");
+    return !id.empty() && !name.empty();
+}
+
+DWORD WINAPI accessWatch(LPVOID) {
+    wchar_t buffer[256];
+    GetPrivateProfileStringW(L"access", L"server", ACCESS_HOST, buffer, 256, iniPath().c_str());
+    std::wstring host = buffer;
+    accessBlocked = GetPrivateProfileIntW(L"access", L"blocked", 0, iniPath().c_str()) != 0;
+    if (accessBlocked) logf("access: EchoQueue is turned off for this account (last answer from the access service)");
+    if (host.empty()) return 0;
+    Sleep(20000);  // let Echo log in and save the profile first
+    for (;;) {
+        std::string id, name;
+        if (readIdentity(id, name)) {
+            int blocked = checkIn(host, id, name);
+            if (blocked >= 0 && accessBlocked.exchange(blocked != 0) != (blocked != 0)) {
+                WritePrivateProfileStringW(L"access", L"blocked", blocked ? L"1" : L"0", iniPath().c_str());
+                logf("access: EchoQueue is %s for this account", blocked ? "turned OFF" : "on again");
+            }
+        }
+        Sleep(DWORD(ACCESS_EVERY_MS));
+    }
+}
+
 // Own thread, ten times a second: adds the time played to today's every 10 s, and while the
 // net game is "in game" (a match or the social lobby, which the API doesn't report) asks the
 // API until it reports a match, which sets inMatch for the LOBBY button.
@@ -1230,7 +1355,16 @@ DWORD WINAPI matchWatch(LPVOID) {
         }
         readMatchesOverall();
         void* netgame = fault ? nullptr : netGame();
-        if (!netgame || at<int>(netgame, NETGAME_STATE) != NETGAME_IN_GAME) { counted = inMatch = false; continue; }
+        // What the coming load is: the last search, if one was going on just before it.
+        static int lastState = -1;
+        int netState = netgame ? at<int>(netgame, NETGAME_STATE) : -1;
+        if (matchmaking(lobbyState())) matchmakingSeenAt = now;
+        if (netState == NETGAME_LOADING && lastState != NETGAME_LOADING) {
+            loadedKind = now - matchmakingSeenAt < 15000 ? searchKind.load() : KIND_UNKNOWN;
+            logf("loading: %s", loadedKind == KIND_PUBLIC ? "a public Echo Arena match" : loadedKind == KIND_OTHER ? "a private match or other mode" : "not from a search (the lobby?)");
+        }
+        lastState = netState;
+        if (netState != NETGAME_IN_GAME) { counted = inMatch = false; matchPublic = -1; continue; }
         if (counted) continue;
         DWORD http = apiSession(body);
         if (!http) {  // also normal in the social lobby, so only worth a word if it never answered
@@ -1241,11 +1375,14 @@ DWORD WINAPI matchWatch(LPVOID) {
         }
         apiDown = false;
         apiSeen = true;
-        if (http != 200) { Sleep(400); continue; }  // the social lobby: no match to report
+        if (http != 200) { matchPublic = 0; Sleep(400); continue; }  // the social lobby: no match to report
         std::string type = jsonString(body, "match_type");
         if (type.empty()) continue;
+        int priv = jsonBool(body, "private_match");
+        if (priv < 0) priv = type.find("Private") != std::string::npos;
         counted = inMatch = true;
-        logf("in a %s match", type.c_str());
+        matchPublic = !priv && type.rfind("Social", 0) != 0;
+        logf("in a %s match (%s)", type.c_str(), matchPublic ? "public: no queueing until it's over" : "private");
     }
 }
 
@@ -1266,7 +1403,19 @@ struct Layout {
     U markers[KINDS] = {};
     unsigned rootSlot = 0;                                      // the root element showing the overlay
     std::vector<unsigned> navStockSelected, navOtherSelected;  // other tabs' highlights, hidden under PLAY
+    std::vector<U> otherTabs;                                   // other mods' tab buttons (optional)
 } layout;
+
+std::vector<U> readHexList(const wchar_t* key, const std::wstring& path) {
+    wchar_t buffer[1024];
+    GetPrivateProfileStringW(L"tablet", key, L"", buffer, 1024, path.c_str());
+    std::vector<U> out;
+    for (wchar_t* p = buffer; *p;) {
+        if (iswxdigit(*p)) out.push_back(wcstoull(p, &p, 16));
+        else p++;
+    }
+    return out;
+}
 
 std::vector<unsigned> readList(const wchar_t* key, const std::wstring& path) {
     wchar_t buffer[256];
@@ -1302,6 +1451,8 @@ bool loadLayout() {
     layout.rootSlot = get(L"root_slot");
     layout.navStockSelected = readList(L"nav_stock_selected", path);
     layout.navOtherSelected = readList(L"nav_other_selected", path);
+    layout.otherTabs = readHexList(L"other_tabs", path);
+    layout.otherTabs.insert(layout.otherTabs.end(), std::begin(ECHO_ARCADE_TABS), std::end(ECHO_ARCADE_TABS));
     if (layout.counts[2] != QUEUE_OVERLAY_ELEMENTS || get(L"overlay_elements") != QUEUE_OVERLAY_ELEMENTS) {
         logf("tablet: EchoQueue.layout is for a different EchoQueue version -- run the installer's Repair");
         return false;
@@ -1319,9 +1470,12 @@ bool loadLayout() {
 }
 
 struct View { void* p = nullptr; bool saved = false; float opacity = 1; };
-enum class Page { Stock, Queue };
+// Other: another mod's tab (Echo Arcade's) was pressed last; its own plugin draws that page.
+enum class Page { Stock, Queue, Other };
 struct Context {
     Page page = Page::Stock;
+    bool sawOther = false;      // another mod's page has been up (it may leave stock pages faded)
+    U stockTab = STOCK_TAB_FIRST;  // the stock tab last pressed
     int navState = -1;          // 0 stock tab highlighted, 1 PLAY
     U navCheckedAt = 0;
     std::array<View, KINDS> views{};
@@ -1340,9 +1494,15 @@ std::map<void*, Context> contexts;                          // keyed by gamespac
 std::map<void*, std::pair<void*, unsigned>> canvases;       // canvas -> (gamespace, kind)
 std::set<void*> pending;
 std::set<std::array<U, 3>> held;                            // (gamespace, actor, component)
+// PLAY pressed while another mod's page was up: that mod only closes its page for a stock tab,
+// so EchoQueue sends one (press and release, through the hooked dispatch so every mod sees it)
+// from the next button update, outside the lock. Our own handler ignores it.
+struct Kick { void* gs = nullptr; U actor = 0, tab = 0; int arg = 0; } kick;
+thread_local bool sendingKick = false;
 
 bool isContent(U n) { return std::find(std::begin(CONTENT), std::end(CONTENT), n) != std::end(CONTENT); }
 bool isStockTab(U n) { return n >= STOCK_TAB_FIRST && n <= STOCK_TAB_LAST; }
+bool isOtherTab(U n) { return std::find(layout.otherTabs.begin(), layout.otherTabs.end(), n) != layout.otherTabs.end(); }
 bool isOurs(U n) {
     return n == QUEUE_TAB || n == QUEUE_START || n == QUEUE_CANCEL || n == QUEUE_LOBBY || n == QUEUE_PRIVATE || n == QUEUE_STATS;
 }
@@ -1384,6 +1544,8 @@ std::string statusFor(int state) {
         return "MATCH FOUND - JOINING...";
     }
     if (state == 8) return "JOINING THE MATCH...";
+    if (accessBlocked) return "ECHOQUEUE IS OFF FOR THIS ACCOUNT";
+    if (inPublicMatch()) return "PUBLIC MATCH - QUEUE WHEN IT ENDS";
     return "TAP FIND MATCH TO QUEUE";
 }
 
@@ -1410,11 +1572,16 @@ void render(Context& c) {
         if (!v.p) continue;
         float& opacity = at<float>(v.p, CANVAS_OPACITY);
         if (active) {
-            if (!v.saved) { v.opacity = opacity; v.saved = true; }
+            // 0 here is another mod's fade (Echo Arcade's), not the page's own opacity.
+            if (!v.saved) { v.opacity = opacity != 0 ? opacity : 1; v.saved = true; }
             if (opacity != 0) alpha(v.p, 0);
         } else if (v.saved) {
             alpha(v.p, v.opacity);
             v.saved = false;
+        } else if (c.sawOther && c.page == Page::Stock && opacity == 0) {
+            // A stock tab is up but a page is still faded: another mod restored the 0 it saw
+            // under PLAY. The game's scripts never fade these pages themselves.
+            alpha(v.p, 1);
         }
     }
     // The overlay: our page, the cover over the stock title and our title tab (shown with PLAY),
@@ -1435,7 +1602,8 @@ void render(Context& c) {
         if (active) {
             for (auto i : layout.navStockSelected) ensure(c.views[1].p, i, false);
             for (auto i : layout.navOtherSelected) ensure(c.views[1].p, i, false);  // their own plugin shows them again
-        } else for (auto i : layout.navStockSelected) show(c.views[1].p, i, true);  // once; the game's scripts pick the right one
+        } else if (c.page != Page::Other)  // (another mod's page draws its own highlight)
+            for (auto i : layout.navStockSelected) show(c.views[1].p, i, true);  // once; the game's scripts pick the right one
         c.navState = nav;
     }
     void* page = c.views[2].p;
@@ -1444,7 +1612,9 @@ void render(Context& c) {
         bool searching = matchmaking(state);
         Queued r = Queued(lastResult.load());
         if (r != Queued::None && now - lastResultAt < 3000 && r != Queued::Started) {
-            c.flash = r == Queued::AlreadySearching ? "ALREADY SEARCHING"
+            c.flash = r == Queued::Blocked ? "ECHOQUEUE IS OFF FOR THIS ACCOUNT"
+                    : r == Queued::PublicMatch ? "IN A PUBLIC MATCH - FINISH IT FIRST"
+                    : r == Queued::AlreadySearching ? "ALREADY SEARCHING"
                     : r == Queued::NotReady ? "NOT READY YET - TRY AGAIN IN A MOMENT" : "COULDN'T QUEUE - SEE ECHOQUEUE.LOG";
             c.flashUntil = lastResultAt + 3000;
         }
@@ -1526,13 +1696,18 @@ void gate(Context& c, void* cs) {
         else if (b.name == QUEUE_LOBBY) hide = c.page != Page::Queue || matchmaking(c.state);
         else if (b.name == QUEUE_PRIVATE) hide = c.page != Page::Queue || matchmaking(c.state);
         else if (b.name == QUEUE_STATS) hide = c.page != Page::Queue;
-        else hide = c.page != Page::Stock;                       // stock page content
+        else hide = c.page == Page::Queue;                       // stock page content (another mod's page hides it itself)
         if (hide && !c.masked.count(b.handle)) {
-            if (b.reasons & 0x8000) { failTablet("button disable bit 0x8000 already owned by another mod"); return; }
-            disableButton(cs, b.handle, 0x8000);
+            if (b.reasons & MASK_BIT) {  // someone else's: it's off already, and theirs to turn back on
+                static std::set<U> warned;
+                if (warned.insert(b.name).second)
+                    logf("tablet: button %016llx already has disable bit %x from another mod; left to it", b.name, MASK_BIT);
+                continue;
+            }
+            disableButton(cs, b.handle, MASK_BIT);
             c.masked.insert(b.handle);
         } else if (!hide && c.masked.count(b.handle)) {
-            enableButton(cs, b.handle, 0x8000);
+            enableButton(cs, b.handle, MASK_BIT);
             c.masked.erase(b.handle);
         }
     }
@@ -1595,6 +1770,23 @@ void perfReport() {
              double(s) / secs, double(t) / secs, double(a) / secs, double(m) / secs, page ? "open" : "closed");
 }
 
+// Closes another mod's page (see Kick). Called without our lock held: the other mod's dispatch
+// hook takes its own lock, and its button hook holds that lock while ours may be waiting.
+void sendKick() {
+    Kick k;
+    {
+        std::lock_guard<std::recursive_mutex> lock(tabletMutex);
+        std::swap(k, kick);
+    }
+    if (!k.gs || tabletFault) return;
+    logf("tablet: closing the other mod's page (stock tab %016llx press)", k.tab);
+    auto entry = fn<Dispatch>(exe, RVA_DISPATCH);  // hooked: reaches every mod, then the game
+    sendingKick = true;
+    entry(k.gs, PRESS, k.actor, k.tab, k.arg);
+    entry(k.gs, RELEASE, k.actor, k.tab, k.arg);
+    sendingKick = false;
+}
+
 void button(void* cs) {
     if (!tabletFault) {
         std::lock_guard<std::recursive_mutex> lock(tabletMutex);
@@ -1604,6 +1796,7 @@ void button(void* cs) {
         perf.ticks++;
         perfReport();
     }
+    sendKick();
     buttonOriginal(cs);
     if (!tabletFault) {
         std::lock_guard<std::recursive_mutex> lock(tabletMutex);
@@ -1642,8 +1835,8 @@ void unload(void* p, U a, U b, U c) {
     unloadOriginal(p, a, b, c);
 }
 
-void onEvent(void* gs, U event, U actor, U component) {
-    if (!isOurs(component) && !isStockTab(component)) return;
+void onEvent(void* gs, U event, U actor, U component, int arg) {
+    if (!isOurs(component) && !isStockTab(component) && !isOtherTab(component)) return;
     auto it = contexts.find(gs);
     if (it == contexts.end() || !it->second.views[0].p) return;
     auto& c = it->second;
@@ -1653,8 +1846,14 @@ void onEvent(void* gs, U event, U actor, U component) {
     if (isStockTab(component)) {
         if (c.page == Page::Queue) logf("tablet: left the PLAY page");
         c.page = Page::Stock;
+        c.stockTab = component;
+    } else if (isOtherTab(component)) {
+        if (c.page == Page::Queue) logf("tablet: left the PLAY page for another mod's tab (%016llx)", component);
+        c.page = Page::Other;
+        c.sawOther = true;
     } else if (component == QUEUE_TAB) {
         if (c.page != Page::Queue) { logf("tablet: PLAY page selected"); playSound(SOUND_CLICK); }
+        if (c.page == Page::Other) kick = Kick{gs, actor, c.stockTab, arg};
         c.page = Page::Queue;
     } else if (component == QUEUE_START && c.page == Page::Queue) {
         logf("tablet: FIND MATCH pressed (thread %lu)", GetCurrentThreadId());
@@ -1676,6 +1875,7 @@ void onEvent(void* gs, U event, U actor, U component) {
     } else if (component == QUEUE_LOBBY && c.page == Page::Queue) {
         logf("tablet: LOBBY pressed (%s)", inMatch ? "in a match" : "not in a match");
         playSound(SOUND_CLICK);
+        if (accessBlocked) { c.flash = "ECHOQUEUE IS OFF FOR THIS ACCOUNT"; c.flashUntil = GetTickCount64() + 3000; return; }
         c.flash = inMatch ? "HEADING TO THE LOBBY..." : "YOU'RE ALREADY IN THE LOBBY";
         c.flashUntil = GetTickCount64() + 3000;
         if (inMatch && !fault) startFade(WM_RETURN, "the lobby");
@@ -1690,9 +1890,9 @@ void onEvent(void* gs, U event, U actor, U component) {
 }
 
 void dispatch(void* gs, U event, U actor, U component, int arg) {
-    if (!tabletFault && (event == PRESS || event == RELEASE)) {
+    if (!tabletFault && !sendingKick && (event == PRESS || event == RELEASE)) {
         std::lock_guard<std::recursive_mutex> lock(tabletMutex);
-        onEvent(gs, event, actor, component);
+        onEvent(gs, event, actor, component, arg);
     }
     dispatchOriginal(gs, event, actor, component, arg);
 }
@@ -1812,7 +2012,7 @@ void installTablet() {
 }
 
 void initialize() {
-    logf("EchoQueue v3.9 starting (pid %lu)", GetCurrentProcessId());
+    logf("EchoQueue v3.10 starting (pid %lu)", GetCurrentProcessId());
     if (!verifyExecutable()) { fault = tabletFault = true; logf("EchoQueue disabled"); return; }
     loadSettings();
     loadToday();
@@ -1829,6 +2029,7 @@ void initialize() {
     attachWindow();
     if (HANDLE t = CreateThread(nullptr, 0, matchWatch, nullptr, 0, nullptr)) CloseHandle(t);
     if (HANDLE t = CreateThread(nullptr, 0, playersWatch, nullptr, 0, nullptr)) CloseHandle(t);
+    if (HANDLE t = CreateThread(nullptr, 0, accessWatch, nullptr, 0, nullptr)) CloseHandle(t);
 }
 
 void start(HMODULE self) {

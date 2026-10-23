@@ -1,4 +1,4 @@
-EchoQueue 3.9 - Echo Arena matchmaking from your hand tablet (Echo VR, EchoVRCE)
+EchoQueue 3.10 - Echo Arena matchmaking from your hand tablet (Echo VR, EchoVRCE)
 
 What it does
   A PLAY tab, first on the hand tablet's tab bar:
@@ -8,8 +8,17 @@ What it does
   * LOBBY takes you from a match back to the social lobby.
   * A stats box (tap to switch): hours played today, matches overall, players online.
   * Joining or leaving fades the headset to black (after [fade] delay_ms).
+  In a public match, FIND MATCH and PRIVATE MATCH wait until the match is over (no leaving your
+  team mid-game); private matches and the lobby are fine.
   Needs Echo VR build 1683152886 and EchoLoader. On any other build it switches itself off and
   says so in plugins\EchoQueue.log.
+
+What it sends
+  When Echo starts, and every 15 minutes while it runs, EchoQueue sends your Echo display name and
+  account ID (the OVR-ORG-... number in your Echo profile) and the EchoQueue version to its
+  author's access service, which answers whether EchoQueue may be used on this account. Nothing
+  else is sent. The author can see who uses EchoQueue and turn it off for an account; if that
+  happens, the PLAY page says "ECHOQUEUE IS OFF FOR THIS ACCOUNT" and Echo itself is unaffected.
 
 Installing (players)
   Close Echo VR, run EchoQueueInstaller.exe. Its window (shown by Microsoft Edge, part of Windows;

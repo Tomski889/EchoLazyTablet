@@ -158,10 +158,41 @@ h2 { margin: 0; font-size: 30px; line-height: 1.15; font-weight: 700; letter-spa
 .card strong { margin-left: auto; font: 700 18px var(--mono); }
 .find { text-align: center; font: 700 13px var(--mono); padding: 7px; background: linear-gradient(#0f6f6a, #0b5552); border: 1px solid #3ad2c8; }
 .boxes { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+.boxes div { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.boxes small { text-align: center; font: 600 8.5px var(--mono); color: #c9d2db; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .boxes span { text-align: center; font: 700 11px var(--mono); padding: 9px 0; background: #0d4b4a; border: 1px solid #1f8f88; }
+/* the mock-up's other pages, after the game's own */
+.page.home { gap: 8px; }
+.banner { height: 34%; min-height: 48px; border: 1px solid #2b3846;
+          background: radial-gradient(120% 140% at 70% 20%, #c98a7a 0%, #6d3a36 45%, #2a1416 100%); }
+.hrow { flex: 1; display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; align-items: start; }
+.hbox { display: flex; flex-direction: column; align-items: center; gap: 4px; min-width: 0; }
+.hbox small { font: 600 8.5px var(--mono); color: #e6ebf0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
+.hbox .level { font: 400 34px var(--mono); line-height: 1.1; }
+.hicon { width: 46px; height: 40px; display: grid; place-items: center; border: 1px solid #1f8f88; background: #071312; }
+.hicon svg { width: 30px; height: 30px; fill: none; stroke: #f3f5f7; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.hicon.on { background: #0d4b4a; border-color: var(--teal); }
+.hbox em { font: 700 9px var(--mono); font-style: normal; color: #ff5a5a; }
+.hbox em.on { color: var(--teal); }
+.plist { flex: 1; min-height: 0; overflow-y: auto; display: grid; grid-template-columns: 1fr 1fr; align-content: start; gap: 6px;
+         scrollbar-width: thin; scrollbar-color: #56616d transparent; }
+.plist .lrow b { font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.plist .lrow div:first-child { min-width: 0; }
+.page.lobby, .page.friends { min-height: 0; }
+.lrow { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 6px 8px 6px 12px;
+        background: linear-gradient(#5c6874, #46515c); border: 1px solid #8a96a2; }
+.lrow b { display: block; font: 700 14px var(--mono); }
+.lrow span { font: 600 9.5px var(--mono); color: #d7dee5; }
+.licon { width: 34px; height: 30px; display: grid; place-items: center; background: #1b8c86; border: 1px solid #8ffff4; }
+.licon svg { width: 22px; height: 22px; fill: none; stroke: #fff; stroke-width: 2.2; stroke-linecap: round; }
+.tmsg { flex: 1; display: grid; place-items: center; }
+.tmsg span { width: 76%; text-align: center; font: 500 11px var(--mono); color: #c9d2db; padding: 7px 10px;
+             background: #2f3f4d; border: 1px solid #56708a; }
 .tabbar { display: flex; justify-content: center; gap: 8px; padding: 9px 10px; border-top: 2px solid #d9dee4; min-height: 54px; }
-.tabbar .t { width: 38px; height: 38px; border-radius: 3px; background: #2c3640; border: 1px solid #56616d; display: grid; place-items: center;
-             font: 700 8px var(--mono); color: #c9d2db; overflow: hidden; }
+.tabbar .t { width: 38px; height: 38px; padding: 0; border-radius: 3px; background: #2c3640; border: 1px solid #56616d; display: grid; place-items: center;
+             font: 700 8px var(--mono); color: #c9d2db; overflow: hidden; cursor: pointer; transition: transform .12s, filter .12s; }
+.tabbar .t:hover { transform: translateY(-2px); filter: brightness(1.25); }
+.tabbar .t.sel { background: #1d6f6b; border-color: var(--teal); }
 .tabbar .t img { width: 100%; height: 100%; }
 .tabbar .t.ours { outline: 2px solid var(--teal); outline-offset: 2px; box-shadow: 0 0 16px rgba(46, 230, 214, .7); animation: pulse 2.2s ease-in-out infinite; }
 .tabbar .t.other { outline: 1px dashed var(--warn); outline-offset: 2px; }
@@ -205,3 +236,27 @@ h2 { margin: 0; font-size: 30px; line-height: 1.15; font-weight: 700; letter-spa
 .where span { flex: 1; min-width: 0; font: 12.5px var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left; }
 .link.change { color: var(--teal); font-weight: 600; }
 .link.change:hover { color: #8ffff4; border-bottom-color: rgba(46, 230, 214, .4); }
+
+/* the PLAY page's READY: opens Echo VR */
+.launchbtn { margin-left: auto; display: flex; flex-direction: column; align-items: flex-end; gap: 2px; padding: 5px 9px 5px 12px;
+             background: rgba(46, 230, 214, .08); border: 1px solid var(--teal); border-radius: 3px; color: var(--text); cursor: pointer;
+             box-shadow: 0 0 12px rgba(46, 230, 214, .35); animation: pulse 2.2s ease-in-out infinite;
+             transition: background .15s, transform .12s; }
+.launchbtn strong { font: 700 18px var(--mono); line-height: 1.1; }
+.launchbtn span { display: flex; align-items: center; gap: 4px; font: 700 9px var(--mono); color: var(--teal); letter-spacing: .04em; }
+.launchbtn i { display: grid; }
+.launchbtn svg { width: 9px; height: 9px; fill: var(--teal); }
+.launchbtn:hover:not(:disabled) { background: rgba(46, 230, 214, .22); transform: translateY(-1px); }
+.launchbtn:hover:not(:disabled) strong::after { content: " ▸"; color: var(--teal); }
+.launchbtn.off { cursor: default; animation: none; box-shadow: none; border-color: #2b3846; background: transparent; }
+.launchbtn.off span { color: var(--dim); }
+.launchbtn.bad span { color: var(--bad); }
+
+/* FIND MATCH: opens Echo VR as well */
+button.find { position: relative; width: 100%; color: var(--text); cursor: pointer; transition: filter .15s, transform .12s; }
+button.find b { font: 700 13px var(--mono); }
+button.find:hover:not(:disabled) { filter: brightness(1.3); transform: translateY(-1px); }
+button.find.off { cursor: default; filter: grayscale(.6) brightness(.7); }
+
+/* what EchoQueue sends, under the main button */
+.privacy { margin: -6px 0 0; text-align: center; font-size: 12px; color: var(--dim); }

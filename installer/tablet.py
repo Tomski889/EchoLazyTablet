@@ -479,8 +479,10 @@ def build(m):
     markers = pick_markers(final, {n: final[n] for n in kinds})
     hide_selected = [p[1] for p in STOCK_TAB_PAIRS]
     others_selected = [i for t in foreign for i in t['elements'] if Canvas.hidden(nav.elements[i])]
+    other_tabs = sorted({u64(buttons.rows[r], 0) for t in foreign for r in t['rows']})
     layout = dict(version=2, canvases=[markers[n] for n in kinds], root_slot=ROOT_SLOT,
-                  nav_stock_selected=hide_selected, nav_other_selected=others_selected, overlay_elements=len(page.elements))
+                  nav_stock_selected=hide_selected, nav_other_selected=others_selected, other_tabs=other_tabs,
+                  overlay_elements=len(page.elements))
     return dict(resources=resources, layout=layout, notes=notes, details=details, page=e, tabs=len(tabs) + 1)
 
 
@@ -561,6 +563,7 @@ def layout_ini(layout):
     lines.append(f"overlay_elements={layout['overlay_elements']}")
     lines.append('nav_stock_selected=' + ','.join(map(str, layout['nav_stock_selected'])))
     lines.append('nav_other_selected=' + ','.join(map(str, layout['nav_other_selected'])))
+    lines.append('other_tabs=' + ','.join(f'{n:016x}' for n in layout.get('other_tabs', ())))  # their tab buttons
     return '\r\n'.join(lines) + '\r\n'
 
 

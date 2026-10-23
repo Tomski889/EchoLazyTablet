@@ -44,6 +44,7 @@
         <svg viewBox="0 0 24 24" class="cta-icon" id="ctaicon"><path d="M12 3v12m0 0l-5-5m5 5l5-5M4 19h16" /></svg>
         <span id="ctatext">Install EchoQueue</span>
       </button>
+      <p class="privacy">EchoQueue sends your Echo name and account ID to its author to check access. Nothing else is sent.</p>
       <div class="links">
         <button class="link" id="uninstall" hidden>Uninstall</button>
         <button class="link" id="detailsbtn">Details</button>
@@ -93,16 +94,8 @@
   <section class="show">
     <div class="tablet">
       <div class="screen">
-        <div class="strip"><span class="tab-title">PLAY</span><span class="sub">ARENA MATCHMAKING</span><span class="x">✕</span></div>
-        <div class="page">
-          <div class="card">
-            <img src="disc.svg" alt="" class="mini-disc">
-            <div><b>ECHO ARENA</b><i>PUBLIC MATCH</i></div>
-            <strong>READY</strong>
-          </div>
-          <div class="find">FIND MATCH</div>
-          <div class="boxes"><span>CREATE</span><span>⌂ GO</span><span>118</span></div>
-        </div>
+        <div class="strip"><span class="tab-title" id="ttitle">PLAY</span><span class="sub" id="tsub">ARENA MATCHMAKING</span><span class="x">✕</span></div>
+        <div class="page" id="tpage"></div>
         <div class="tabbar" id="tabbar"></div>
       </div>
     </div>
