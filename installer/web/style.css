@@ -187,3 +187,10 @@ h2 { margin: 0; font-size: 30px; line-height: 1.15; font-weight: 700; letter-spa
   .app { grid-template-columns: 1fr; height: auto; }
   .tablet { transform: none; }
 }
+
+/* report a bug, bottom left */
+.bug { position: fixed; left: 18px; bottom: 16px; z-index: 50; display: flex; align-items: center; gap: 7px;
+       font-size: 13px; color: var(--dim); background: var(--glass); border: 1px solid var(--edge);
+       border-radius: 999px; padding: 7px 14px 7px 10px; transition: color .15s, background .15s, border-color .15s; }
+.bug:hover { color: var(--text); background: var(--glass-2); border-color: rgba(255, 107, 107, .4); }
+.bug svg { width: 17px; height: 17px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }

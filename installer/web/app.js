@@ -180,3 +180,4 @@ $('admin').onclick = () => api('admin', {});
 
 refresh();
 setInterval(refresh, 600);
+$('bug').onclick = () => api('bug', {});

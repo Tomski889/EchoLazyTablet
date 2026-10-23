@@ -17,6 +17,7 @@ from urllib.parse import urlparse
 import patcher
 
 TOKEN = secrets.token_urlsafe(24)
+ISSUES = 'https://github.com/Tomski889/EchoQueue/issues/new'   # where Report a bug goes
 WEB = Path(getattr(sys, '_MEIPASS', Path(__file__).resolve().parent)) / 'web'
 TYPES = {'.html': 'text/html; charset=utf-8', '.css': 'text/css', '.js': 'application/javascript', '.svg': 'image/svg+xml'}
 
@@ -170,6 +171,13 @@ class Handler(BaseHTTPRequestHandler):
         if path in ('/api/install', '/api/uninstall'):
             STATE.run(path.rsplit('/', 1)[1])
             return self.send(200, STATE.view())
+        if path == '/api/bug':
+            import webbrowser
+            from urllib.parse import urlencode
+            body = (f'**EchoQueue version:** {patcher.VERSION}\n\n**What happened:**\n\n\n'
+                    '**What you expected:**\n\n\n**Steps to make it happen again:**\n1. \n')
+            webbrowser.open(ISSUES + '?' + urlencode(dict(title='Bug: ', body=body, labels='bug')))
+            return self.send(200, {})
         if path == '/api/admin':
             threading.Timer(.3, relaunch_as_admin).start()
             return self.send(200, {})
