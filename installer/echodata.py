@@ -1,6 +1,6 @@
-"""Echo VR data files, as EchoQueue's installer needs them (win10 build, manifest 48037dc70b0ecab2).
+"""Echo VR data files, as EchoLazyTablet's installer needs them (win10 build, manifest 48037dc70b0ecab2).
 
-Written for EchoQueue; needs `zstandard`.
+Written for EchoLazyTablet; needs `zstandard`.
 
 Symbols   64-bit names: a CRC-64 style hash of the lowercased ASCII name (CSymbol64). A resource
           type is the hash of "Win10" (or "Win10GPU") seeded with the hash of the class name.

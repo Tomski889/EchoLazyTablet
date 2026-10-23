@@ -1,4 +1,4 @@
-// EchoQueue installer window. Talks to webapp.py; every call carries the token from the URL.
+// EchoLazyTablet installer window. Talks to webapp.py; every call carries the token from the URL.
 const TOKEN = location.hash.slice(1);
 const $ = (id) => document.getElementById(id);
 let view = null;
@@ -15,7 +15,7 @@ const ICONS = {
 };
 const STAGES = {
   install: [['check', 'Checking your game'], ['build', 'Building your PLAY tab'], ['write', 'Installing the tab'],
-            ['verify', 'Double-checking'], ['plugin', 'Adding the EchoQueue plugin']],
+            ['verify', 'Double-checking'], ['plugin', 'Adding the EchoLazyTablet plugin']],
   uninstall: [['check', 'Checking your game'], ['write', 'Taking the PLAY tab out'], ['plugin', 'Removing the plugin']],
 };
 
@@ -40,12 +40,13 @@ function situation(v) {
   if (!s && v.scanning) return { kind: 'busy', title: 'Getting ready…', text: 'Looking at your game and its hand tablet.' };
   if (!s || s.found === false) return { kind: 'bad', title: "Can't find Echo VR", text: 'Show us where it is: pick the folder called ready-at-dawn-echo-arena.', action: 'browse' };
   const p = s.problems.join(' ');
-  if (/build/.test(p)) return { kind: 'bad', title: 'Different Echo VR version', text: 'EchoQueue is made for Echo VR build 1683152886.' };
-  if (/EchoLoader/.test(p)) return { kind: 'bad', title: 'EchoLoader needed', text: 'Install EchoLoader first: EchoQueue runs as one of its plugins.' };
+  if (/build/.test(p)) return { kind: 'bad', title: 'Different Echo VR version', text: 'EchoLazyTablet is made for Echo VR build 1683152886.' };
+  if (/EchoLoader/.test(p)) return { kind: 'bad', title: 'EchoLoader needed', text: 'Install EchoLoader first: EchoLazyTablet runs as one of its plugins.' };
   if (s.problems.some((x) => !/running/.test(x))) return { kind: 'bad', title: "Can't add the tab", text: s.problems.filter((x) => !/running/.test(x)).join('\n') };
   const running = /running/.test(p);
+  if (s.state.includes('now EchoLazyTablet')) return { kind: 'warn', title: 'EchoQueue is now EchoLazyTablet', text: running ? 'Close Echo VR, then update.' : 'Update to the new version. Your settings are kept.', action: 'repair' };
   if (s.state.includes('Repair')) return { kind: 'warn', title: 'Needs a quick repair', text: running ? 'Close Echo VR, then repair.' : 'Another mod changed your tablet. Repair puts PLAY back.', action: 'repair' };
-  if (s.state.startsWith('installed')) return { kind: 'ok', title: "You're all set", text: running ? 'EchoQueue is installed. Close Echo VR to make changes.' : `EchoQueue ${v.version} is installed. Repair if your tab ever goes missing.`, action: 'repair', installed: true };
+  if (s.state.startsWith('installed')) return { kind: 'ok', title: "You're all set", text: running ? 'EchoLazyTablet is installed. Close Echo VR to make changes.' : `EchoLazyTablet ${v.version} is installed. Repair if your tab ever goes missing.`, action: 'repair', installed: true };
   return { kind: running ? 'warn' : 'ready', title: 'Ready to install', text: running ? 'Close Echo VR first, then install.' : 'One click adds the PLAY tab to your hand tablet.', action: 'install' };
 }
 
@@ -73,7 +74,7 @@ function renderMain(v) {
   const busy = v.job.busy || v.scanning;
   const blocked = !sit.action || /running/.test(s && s.problems ? s.problems.join(' ') : '');
   $('install').disabled = busy || blocked;
-  $('ctatext').textContent = sit.action === 'browse' ? 'Find my Echo VR folder' : sit.action === 'repair' ? (sit.installed ? 'Repair EchoQueue' : 'Repair now') : 'Install EchoQueue';
+  $('ctatext').textContent = sit.action === 'browse' ? 'Find my Echo VR folder' : sit.action === 'repair' ? (sit.installed ? 'Repair EchoLazyTablet' : 'Repair now') : 'Install EchoLazyTablet';
   $('ctaicon').innerHTML = sit.action === 'browse' ? ICONS.folder : sit.action === 'repair' ? ICONS.repair : ICONS.install;
   $('uninstall').hidden = !(s && s.state && (s.state.startsWith('installed') || s.state.includes('Repair')));
   $('uninstall').disabled = busy;
@@ -84,7 +85,7 @@ function renderMain(v) {
   const mods = s && s.found !== false ? [...(s.echomods ? ['Echo Mods'] : []), ...(s.plugins || []).map((m) => m.replace(/\.dll$/i, ''))] : [];
   $('modsfield').hidden = !mods.length;
   $('mods').replaceChildren(...mods.map((m) => el('span', '', m)));
-  const notes = s && s.found !== false ? [...(s.echomods ? ['Echo Mods found: EchoQueue is switched on in its profiles, so Echo Mods keeps it on.'] : []), ...(s.notes || [])] : [];
+  const notes = s && s.found !== false ? [...(s.echomods ? ['Echo Mods found: EchoLazyTablet is switched on in its profiles, so Echo Mods keeps it on.'] : []), ...(s.notes || [])] : [];
   $('notes').replaceChildren(...notes.map((n) => el('li', '', n)));
   const btn = $('detailsbtn');
   btn.className = 'link' + (notes.length && $('details').hidden ? ' hint' : '');
@@ -263,7 +264,7 @@ function renderJob(v) {
   if (inJob) {
     const stages = STAGES[job.kind] || STAGES.install;
     const at = Math.max(0, stages.findIndex(([k]) => k === job.stage));
-    $('ptitle').textContent = job.kind === 'install' ? (situation(v).installed ? 'Repairing EchoQueue' : 'Installing EchoQueue') : 'Removing EchoQueue';
+    $('ptitle').textContent = job.kind === 'install' ? (situation(v).installed ? 'Repairing EchoLazyTablet' : 'Installing EchoLazyTablet') : 'Removing EchoLazyTablet';
     $('pfill').style.width = `${Math.round(((at + .6) / stages.length) * 100)}%`;
     $('steps').replaceChildren(...stages.map(([, label], i) => el('li', i < at ? 'done' : i === at ? 'now' : '', label)));
   }
@@ -304,7 +305,7 @@ function confirmBox(title, text, yes) {
 $('install').onclick = async () => {
   if (situation(view).action === 'browse') return render(await api('browse', {}));
   const repair = situation(view).action === 'repair';
-  const ok = await confirmBox(repair ? 'Repair EchoQueue?' : 'Install EchoQueue?',
+  const ok = await confirmBox(repair ? 'Repair EchoLazyTablet?' : 'Install EchoLazyTablet?',
     `${repair ? 'This rebuilds the PLAY tab on your tablet as it is now.' : 'This adds the PLAY tab to your hand tablet.'}\nKeep Echo VR closed until it's done.`,
     repair ? 'Repair' : 'Install');
   if (!ok) return;
@@ -312,7 +313,7 @@ $('install').onclick = async () => {
   render(await api('install', {}));
 };
 $('uninstall').onclick = async () => {
-  if (!(await confirmBox('Uninstall EchoQueue?', 'The PLAY tab and plugin are removed. Your other mods stay exactly as they are.', 'Uninstall'))) return;
+  if (!(await confirmBox('Uninstall EchoLazyTablet?', 'The PLAY tab and plugin are removed. Your other mods stay exactly as they are.', 'Uninstall'))) return;
   showResult = true;
   render(await api('uninstall', {}));
 };

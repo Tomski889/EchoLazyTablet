@@ -1,11 +1,11 @@
-"""Builds EchoQueue's PLAY tab on top of the hand tablet as it is now, other tablet mods included.
+"""Builds EchoLazyTablet's PLAY tab on top of the hand tablet as it is now, other tablet mods included.
 
-build(manifest) takes a manifest with no EchoQueue in it (the patcher takes ours out first) and
+build(manifest) takes a manifest with no EchoLazyTablet in it (the patcher takes ours out first) and
 returns the resources to add, the layout file the plugin reads, and notes on what it found:
 
   * the root canvas, tab bar and touch-button table are whatever the manifest holds now (stock
     or another mod's). No canvas changes its element count (other mods' plugins find the tablet
-    by exact counts, e.g. Echo Arcade's root 10 / tab bar 13): everything EchoQueue shows is one
+    by exact counts, e.g. Echo Arcade's root 10 / tab bar 13): everything EchoLazyTablet shows is one
     overlay canvas of its own, shown by the root's unused stock element 6 (a hidden panel,
     turned into a child-canvas element). Touch areas are appended to the button table;
   * every tab in the tab bar (stock or another mod's: anything tab-sized in the bar strip, with
@@ -14,7 +14,7 @@ returns the resources to add, the layout file the plugin reads, and notes on wha
   * the plugin finds its canvases by element count plus one element's name; for each canvas the
     name is picked so that no other canvas with that many elements has it at that index.
 
-All art comes from the game's own tablet atlas (nothing from the game ships with EchoQueue).
+All art comes from the game's own tablet atlas (nothing from the game ships with EchoLazyTablet).
 `python tablet.py --game <...> --header <out.h>` regenerates the plugin's page constants.
 """
 import struct
@@ -36,7 +36,7 @@ STOCK_TAB_PAIRS = ((1, 2), (3, 4), (5, 6), (7, 8))   # (idle, selected) sprites 
 STOCK_BUTTON_ROWS = 41                    # touch areas in the stock r14_glb_global_mp table
 
 PAGE = sym('echo_queue_page_v1')         # v3.8 and before: the PLAY page canvas (now inside OVERLAY)
-OVERLAY = sym('echo_queue_overlay_v1')    # v3.9: everything EchoQueue shows, on the root's element 6
+OVERLAY = sym('echo_queue_overlay_v1')    # v3.9: everything EchoLazyTablet shows, on the root's element 6
 ROOT_SLOT, ROOT_SLOT_NAME = 6, 0xfb8485552d32128c
 ICON_TEXTURE = sym('echo_queue_tab_icon_texture_v1')
 TAB_BUTTON = sym('echo_queue_tab_button_v1')
@@ -45,7 +45,7 @@ CANCEL_BUTTON = sym('echo_queue_cancel_button_v1')
 LOBBY_BUTTON = sym('echo_queue_lobby_button_v1')
 STATS_BUTTON = sym('echo_queue_stats_button_v1')
 PRIVATE_BUTTON = sym('echo_queue_private_button_v1')
-OURS = {PAGE, OVERLAY, ICON_TEXTURE}      # resources only EchoQueue has
+OURS = {PAGE, OVERLAY, ICON_TEXTURE}      # resources only EchoLazyTablet has
 
 # Geometry in tablet canvas pixels (1024 px = 0.3 m).
 PAGE_X, PAGE_Y, PAGE_W, PAGE_H = 12, 112, 1000, 528
@@ -180,10 +180,10 @@ def texture_pair(m, w, h, pixels, fmt=DXGI_B8G8R8A8_UNORM_SRGB):
     cpu = bytearray(m.get(TEX, BGRA_TEMPLATE) or b'')
     gpu = m.get(TEX_GPU, BGRA_TEMPLATE) or b''
     if len(cpu) != 256 or struct.unpack_from('<I', cpu, 0xd8)[0] != DXGI_B8G8R8A8_UNORM:
-        raise TabletError('A stock texture EchoQueue copies its format from is not as expected.')
+        raise TabletError('A stock texture EchoLazyTablet copies its format from is not as expected.')
     dds = bytearray(gpu[:148])
     if dds[:4] != b'DDS ' or dds[84:88] != b'DX10' or struct.unpack_from('<I', dds, 128)[0] != DXGI_B8G8R8A8_UNORM:
-        raise TabletError('A stock texture EchoQueue copies its format from is not as expected.')
+        raise TabletError('A stock texture EchoLazyTablet copies its format from is not as expected.')
     pitch = w * 4
     struct.pack_into('<III', dds, 12, h, w, pitch)
     struct.pack_into('<I', dds, 128, fmt)
@@ -250,17 +250,17 @@ def pick_markers(canvases, targets):
                 out[name] = (count, i, marker)
                 break
         else:
-            raise TabletError('Another tablet page looks exactly like one EchoQueue needs to find; '
+            raise TabletError('Another tablet page looks exactly like one EchoLazyTablet needs to find; '
                               'the plugin could mix them up.')
     return out
 
 
 # ---- the build ----
 def build(m):
-    """`m`: an echodata.Manifest without EchoQueue. -> dict(resources, layout, notes, page)."""
+    """`m`: an echodata.Manifest without EchoLazyTablet. -> dict(resources, layout, notes, page)."""
     notes = []
     if m.get(CV, PAGE) is not None or m.get(CV, OVERLAY) is not None:
-        raise TabletError('The PLAY tab is still in the game data; take EchoQueue out first.')
+        raise TabletError('The PLAY tab is still in the game data; take EchoLazyTablet out first.')
     raw_root, raw_nav, raw_donor = m.get(CV, ROOT_CANVAS), m.get(CV, NAV_CANVAS), m.get(CV, TITLE_DONOR)
     raw_buttons = m.get(BUTTONS, LEVEL)
     if None in (raw_root, raw_nav, raw_donor, raw_buttons):
@@ -275,16 +275,16 @@ def build(m):
         (0xd66db0afd38fc682, 0xbe0c08782bee86be, 0x5453c273c2b6e9cd, 0x5b2b3c9f0a9985e0, 0x0c36d89ba7e45441,
          0x4900cc344f124e30, 0x11744364669c90ab, 0x1de409fe5b4ff4a0, 0xad01a8e7b7c0ae3d)))
     if not stock_nav:
-        raise TabletError("The tab bar's own icons have been replaced by another mod; EchoQueue can't place its tab safely.")
+        raise TabletError("The tab bar's own icons have been replaced by another mod; EchoLazyTablet can't place its tab safely.")
     if len(donor.elements) < 2:
-        raise TabletError('A stock tablet canvas EchoQueue copies its text style from has changed.')
+        raise TabletError('A stock tablet canvas EchoLazyTablet copies its text style from has changed.')
     details = []     # technical, for the install log; `notes` are for players
     if len(root.elements) > 7:
         details.append(f'The tablet root has {len(root.elements) - 7} element(s) from other mods; kept, and the count stays the same.')
     if len(nav.elements) > 9:
         details.append(f'The tab bar has {len(nav.elements) - 9} element(s) from other mods; kept, and the count stays the same.')
     if len(buttons.rows) > STOCK_BUTTON_ROWS:
-        details.append(f'The tablet has {len(buttons.rows) - STOCK_BUTTON_ROWS} touch area(s) from other mods; EchoQueue adds its own after them.')
+        details.append(f'The tablet has {len(buttons.rows) - STOCK_BUTTON_ROWS} touch area(s) from other mods; EchoLazyTablet adds its own after them.')
 
     old_root = [bytes(r) for r in root.elements]
     old_nav = [bytes(r) for r in nav.elements]
@@ -296,20 +296,20 @@ def build(m):
     tabs = find_tabs(nav, buttons)
     stock_found = [t for t in tabs if t['stock']]
     if len(stock_found) != 4 or any(len(t['rows']) != 1 for t in stock_found):
-        raise TabletError("The stock tabs or their touch areas aren't where EchoQueue expects them.")
+        raise TabletError("The stock tabs or their touch areas aren't where EchoLazyTablet expects them.")
     foreign = [t for t in tabs if not t['stock']]
     for t in foreign:
         details.append(f"Found another mod's tab at x={t['center']:.0f} ({len(t['elements'])} element(s), "
                        f"{len(t['rows'])} touch area(s)); it moves along with the stock tabs.")
         if not t['rows']:
-            details.append('  That tab has no touch area EchoQueue could match; only its icon moves.')
-            notes.append("One of the other mods' tabs has no touch area EchoQueue recognises; if it stops responding, "
+            details.append('  That tab has no touch area EchoLazyTablet could match; only its icon moves.')
+            notes.append("One of the other mods' tabs has no touch area EchoLazyTablet recognises; if it stops responding, "
                          'reinstall that mod and then Repair here.')
     if foreign:
         notes.insert(0, f"Another tablet mod is installed ({len(foreign)} tab{'s' if len(foreign) > 1 else ''}). "
-                        'It keeps working: EchoQueue only moves its tabs along to make room.')
+                        'It keeps working: EchoLazyTablet only moves its tabs along to make room.')
     elif details:
-        notes.insert(0, 'Another mod has changed your tablet. EchoQueue builds around it and leaves it as it is.')
+        notes.insert(0, 'Another mod has changed your tablet. EchoLazyTablet builds around it and leaves it as it is.')
     centers = tab_centers(len(tabs) + 1)
     for t, new in zip(tabs, centers[1:]):
         dx = new - t['center']
@@ -325,7 +325,7 @@ def build(m):
     c = centers[0]
     tab_rect = (c - TAB_SIZE / 2, BAR_Y[0], c + TAB_SIZE / 2, BAR_Y[1])
 
-    # Everything EchoQueue shows is one overlay canvas covering the tablet, shown by the root's
+    # Everything EchoLazyTablet shows is one overlay canvas covering the tablet, shown by the root's
     # unused element 6, so no canvas another mod checks changes its element count. The PLAY
     # page is element 0 (its background) and its children; then the title strip and the tab.
     page = Canvas.empty(raw_donor, 1024, 768)
@@ -416,7 +416,7 @@ def build(m):
     # overlay's child-canvas element; it keeps its name and index (VR-tested 23 Oct).
     six = root.elements[ROOT_SLOT]
     if Canvas.name(six) != ROOT_SLOT_NAME or Canvas.kind(six) != 2 or Canvas.kind(old_root[1]) != 7:
-        raise TabletError("The tablet root's spare element has been changed by another mod; EchoQueue has nowhere to hang its tab.")
+        raise TabletError("The tablet root's spare element has been changed by another mod; EchoLazyTablet has nowhere to hang its tab.")
     slot = bytearray(old_root[1])
     slot[0:8] = six[0:8]
     struct.pack_into('<I', slot, 0x10, 0)
@@ -553,8 +553,8 @@ def tab_preview(m, built):
 
 
 def layout_ini(layout):
-    """The layout as the plugin reads it (plugins\\EchoQueue.layout)."""
-    lines = ['; Written by the EchoQueue installer for this PC\'s tablet. Repair rewrites it.', '[tablet]',
+    """The layout as the plugin reads it (plugins\\EchoLazyTablet.layout)."""
+    lines = ['; Written by the EchoLazyTablet installer for this PC\'s tablet. Repair rewrites it.', '[tablet]',
              f"version={layout['version']}"]
     names = ('root', 'nav', 'overlay', 'lobby', 'rows', 'settings', 'title')
     for name, (count, index, marker) in zip(names, layout['canvases']):

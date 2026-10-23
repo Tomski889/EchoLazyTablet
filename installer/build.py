@@ -1,8 +1,8 @@
-"""Builds dist/EchoQueueInstaller.exe (run build.cmd first, for dist/EchoQueue.dll).
+"""Builds dist/EchoLazyTabletInstaller.exe (run build.cmd first, for dist/EchoLazyTablet.dll).
 
     python installer/build.py
 
-The installer bundles: EchoQueue.dll and the default EchoQueue.ini (payload/), this folder's
+The installer bundles: EchoLazyTablet.dll and the default EchoLazyTablet.ini (payload/), this folder's
 Python code, Pillow, python-zstandard, texture2ddecoder and pywebview (its own window, on
 Windows' WebView2) with pythonnet (pydeps/), and Python itself.
 THIRD_PARTY_NOTICES.txt goes inside it and next to it.
@@ -55,17 +55,17 @@ def icon(path):
 
 
 def main():
-    dll = ROOT / 'dist/EchoQueue.dll'
+    dll = ROOT / 'dist/EchoLazyTablet.dll'
     if not dll.exists():
         raise SystemExit('Build the plugin first (build.cmd).')
     if PAYLOAD.exists():
         shutil.rmtree(PAYLOAD)
     PAYLOAD.mkdir()
-    shutil.copy2(dll, PAYLOAD / 'EchoQueue.dll')
-    shutil.copy2(ROOT / 'EchoQueue.ini', PAYLOAD / 'EchoQueue.ini')
-    text = notices(('EchoQueue', 'EchoQueue and its installer: by the EchoQueue author. The tablet art is drawn at install time '
+    shutil.copy2(dll, PAYLOAD / 'EchoLazyTablet.dll')
+    shutil.copy2(ROOT / 'EchoLazyTablet.ini', PAYLOAD / 'EchoLazyTablet.ini')
+    text = notices(('EchoLazyTablet', 'EchoLazyTablet and its installer: by the EchoLazyTablet author. The tablet art is drawn at install time '
                                  "from the player's own copy of Echo VR; no game files are included."),
-                   [('MinHook (in EchoQueue.dll)', ROOT / 'vendor/minhook/LICENSE.txt'),
+                   [('MinHook (in EchoLazyTablet.dll)', ROOT / 'vendor/minhook/LICENSE.txt'),
                     ('Pillow', DEPS / 'pillow-11.3.0.dist-info/licenses/LICENSE'),
                     ('python-zstandard (includes Zstandard)', DEPS / 'zstandard-0.25.0.dist-info/licenses/LICENSE'),
                     ('texture2ddecoder', DEPS / 'texture2ddecoder-1.0.5.dist-info/LICENSE'),
@@ -78,7 +78,7 @@ def main():
     work.mkdir(parents=True, exist_ok=True)
     icon(work / 'echoqueue.ico')
     subprocess.check_call([sys.executable, '-m', 'PyInstaller', '--noconfirm', '--clean', '--onefile', '--windowed',
-                           '--name', 'EchoQueueInstaller', '--icon', str(work / 'echoqueue.ico'),
+                           '--name', 'EchoLazyTabletInstaller', '--icon', str(work / 'echoqueue.ico'),
                            '--paths', str(DEPS), '--paths', str(HERE),
                            '--hidden-import', 'zstandard.backend_c', '--hidden-import', 'texture2ddecoder',
                            '--add-data', f'{PAYLOAD};payload', '--add-data', f'{HERE / "web"};web',
@@ -86,7 +86,7 @@ def main():
                            '--hidden-import', 'webapp', '--hidden-import', 'webview', str(HERE / 'app.py')])
     (ROOT / 'dist/THIRD_PARTY_NOTICES.txt').write_text(text, encoding='utf-8')
     shutil.copy2(ROOT / 'README.txt', ROOT / 'dist/README.txt')
-    print('built', ROOT / 'dist/EchoQueueInstaller.exe')
+    print('built', ROOT / 'dist/EchoLazyTabletInstaller.exe')
 
 
 if __name__ == '__main__':

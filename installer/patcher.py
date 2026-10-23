@@ -1,10 +1,10 @@
-"""Install, repair and remove EchoQueue, and report what else is on the hand tablet.
+"""Install, repair and remove EchoLazyTablet, and report what else is on the hand tablet.
 
-EchoQueue's game data is one extra package plus the manifest entries pointing at it. What each of
+EchoLazyTablet's game data is one extra package plus the manifest entries pointing at it. What each of
 those entries pointed at before (stock data, or another mod's version of the same tablet page) is
-kept in manifests/48037dc70b0ecab2.echoqueue.json, so taking EchoQueue out puts exactly that back
+kept in manifests/48037dc70b0ecab2.echoqueue.json, so taking EchoLazyTablet out puts exactly that back
 and leaves every other mod's changes alone. Install and Repair always start by taking out any
-EchoQueue already there, then rebuild the tab on top of the tablet as it is now.
+EchoLazyTablet already there, then rebuild the tab on top of the tablet as it is now.
 
 Before any change the manifest is copied to manifests/48037dc70b0ecab2.echoqueue-backup. New files
 are written beside the old ones and only swapped in once they read back correctly.
@@ -21,16 +21,19 @@ from pathlib import Path
 import echodata as E
 import tablet
 
-VERSION = '3.12'
+VERSION = '3.13'
 EXE_TIMESTAMP = 1683152886
 DATA = Path('_data/5932408047/rad15/win10')
 STOCK_PACKAGES = 3
 RECORD = E.MID + '.echoqueue.json'
 BACKUP = E.MID + '.echoqueue-backup'
-OLD_BACKUP = E.MID + '.before-echoqueue'          # left by the first EchoQueue installer
+OLD_BACKUP = E.MID + '.before-echoqueue'          # left by the first installer (when it was EchoQueue)
 OUR_RESOURCES = {(tablet.CV, tablet.ROOT_CANVAS), (tablet.CV, tablet.NAV_CANVAS), (tablet.CV, tablet.PAGE), (tablet.CV, tablet.OVERLAY),
                  (tablet.BUTTONS, tablet.LEVEL), (tablet.TEX, tablet.ICON_TEXTURE), (tablet.TEX_GPU, tablet.ICON_TEXTURE)}
-PLUGIN_FILES = ('EchoQueue.dll', 'EchoQueue.ini', 'EchoQueue.layout')
+PLUGIN_FILES = ('EchoLazyTablet.dll', 'EchoLazyTablet.ini', 'EchoLazyTablet.layout')
+# EchoLazyTablet was called EchoQueue until 3.13: its plugin files, replaced on install (settings carried over).
+OLD_DLL, OLD_INI, OLD_LAYOUT = 'EchoQueue.dll', 'EchoQueue.ini', 'EchoQueue.layout'
+OUR_DLLS = ('echolazytablet.dll', 'echoqueue.dll')
 
 
 class InstallError(Exception):
@@ -136,7 +139,7 @@ class Game:
         try:
             return json.loads(self.record.read_text())
         except ValueError:
-            raise InstallError(f'{self.record.name} is damaged; EchoQueue cannot tell what it changed.')
+            raise InstallError(f'{self.record.name} is damaged; EchoLazyTablet cannot tell what it changed.')
 
     def loader_plugins(self):
         try:
@@ -151,17 +154,17 @@ def check(game, need_closed=True):
     if not is_game(game.folder):
         return [f'{game.folder} is not an Echo VR folder.']
     if exe_timestamp(game.bin / 'echovr.exe') != EXE_TIMESTAMP:
-        problems.append('This Echo VR build is not the one EchoQueue was made for (1683152886); EchoQueue would switch itself off.')
+        problems.append('This Echo VR build is not the one EchoLazyTablet was made for (1683152886); EchoLazyTablet would switch itself off.')
     if not (game.bin / 'dinput8.dll').is_file():
-        problems.append('EchoLoader is not installed (bin\\win10\\dinput8.dll is missing). Install EchoLoader first; EchoQueue is one of its plugins.')
+        problems.append('EchoLoader is not installed (bin\\win10\\dinput8.dll is missing). Install EchoLoader first; EchoLazyTablet is one of its plugins.')
     if need_closed and echo_running():
         problems.append('Echo VR is running. Close it first.')
     return problems
 
 
-# ---- taking EchoQueue out (in memory) ----
+# ---- taking EchoLazyTablet out (in memory) ----
 def _ours(m, record):
-    """-> (package number, [frame indices]) of EchoQueue's data in `m`, or (None, [])."""
+    """-> (package number, [frame indices]) of EchoLazyTablet's data in `m`, or (None, [])."""
     if record and record.get('schema') == 2:
         n = record['package']
         mine = {tuple(f) for f in record['frames']}
@@ -169,8 +172,8 @@ def _ours(m, record):
         if frames:
             return n, frames
     # First installer (schema 1, or no record), or another tool put back an older manifest with an
-    # earlier EchoQueue in it (seen: Echo Mods restoring its pre-rebuild copy): a package holding
-    # only EchoQueue's resources.
+    # earlier EchoLazyTablet in it (seen: Echo Mods restoring its pre-rebuild copy): a package holding
+    # only EchoLazyTablet's resources.
     for n in range(STOCK_PACKAGES, m.packages):
         frames = [i for i, f in enumerate(m.frames) if f[0] == n]
         users = {(e[0], e[1]) for e in m.entries if m.frames[e[2] & 0xFFFFFFFF][0] == n}
@@ -180,14 +183,14 @@ def _ours(m, record):
 
 
 def _previous(game, m, record):
-    """What EchoQueue's resources pointed at before it: {(type, name): (entry, hash, frame) or None}."""
+    """What EchoLazyTablet's resources pointed at before it: {(type, name): (entry, hash, frame) or None}."""
     if record and record.get('schema') == 2:
         return {(int(p['type'], 16), int(p['name'], 16)): (p['entry'], p['hash'], p['frame']) if p['entry'] else None
                 for p in record['previous']}
     backup = game.manifests / OLD_BACKUP
     if not backup.exists():
-        raise InstallError('EchoQueue was installed by its first installer, but that installer\'s backup '
-                           f'({OLD_BACKUP}) is gone, so EchoQueue cannot be taken out cleanly.')
+        raise InstallError('EchoLazyTablet was installed by its first installer, but that installer\'s backup '
+                           f'({OLD_BACKUP}) is gone, so EchoLazyTablet cannot be taken out cleanly.')
     old = E.Manifest(backup.read_bytes(), game.data)
     out = {}
     for key in OUR_RESOURCES:
@@ -197,13 +200,13 @@ def _previous(game, m, record):
 
 
 def strip(game, m, record):
-    """Takes EchoQueue out of manifest `m` in place. -> (package number or None, package now unused)."""
+    """Takes EchoLazyTablet out of manifest `m` in place. -> (package number or None, package now unused)."""
     n, frames = _ours(m, record)
     if n is None:
         return None, False
     first, count = frames[0], len(frames)
     if frames != list(range(first, first + count)):
-        raise InstallError("EchoQueue's data is mixed in with another mod's; it can't be taken out safely.")
+        raise InstallError("EchoLazyTablet's data is mixed in with another mod's; it can't be taken out safely.")
     previous = _previous(game, m, record)
     keep_slot = n != m.packages - 1                 # another package follows: its number must not move
     markers = [[n, 0, 0, 0]] if keep_slot else []
@@ -218,11 +221,11 @@ def strip(game, m, record):
         if first <= frame < first + count:
             prev = previous.get((e[0], e[1]))
             if prev is None:
-                continue                            # EchoQueue added it: it goes
+                continue                            # EchoLazyTablet added it: it goes
             pe, ph, pf = prev
             j = by_tuple.get(tuple(pf))
             if j is None:
-                raise InstallError('The tablet data EchoQueue replaced has since been removed by another tool, '
+                raise InstallError('The tablet data EchoLazyTablet replaced has since been removed by another tool, '
                                    'so it cannot be put back.')
             e = [pe[0], pe[1], j | (pe[2] >> 32 << 32), pe[3], pe[4]]
             h = list(ph)
@@ -235,7 +238,7 @@ def strip(game, m, record):
     m.frames = m.frames[:first] + markers + m.frames[first + count:]
     if not keep_slot:
         m.packages -= 1
-        # Empty slots EchoQueue added to step over other tools' stray package files go too, once
+        # Empty slots EchoLazyTablet added to step over other tools' stray package files go too, once
         # they're last again.
         slots = set((record or {}).get('slots', []))
         while m.packages - 1 in slots and m.frames and m.frames[-1][0] == m.packages - 1 and m.frames[-1][2] == 0 \
@@ -247,7 +250,7 @@ def strip(game, m, record):
 
 
 def without_echoqueue(game):
-    """-> (manifest without EchoQueue, its package number or None, whether that package file is now unused)."""
+    """-> (manifest without EchoLazyTablet, its package number or None, whether that package file is now unused)."""
     m = game.load()
     n, unused = strip(game, m, game.read_record())
     return m, n, unused
@@ -255,9 +258,9 @@ def without_echoqueue(game):
 
 # ---- Echo Mods (a mod manager: it switches plugins per profile, and rebuilds the lobby) ----
 # Applying an Echo Mods profile switches every plugin to that profile's choice, and plugins a
-# profile doesn't name are switched off: EchoQueue has to be named, as on, in its profiles.
+# profile doesn't name are switched off: EchoLazyTablet has to be named, as on, in its profiles.
 # Its lobby rebuilds start from a manifest snapshot (<manifest>.theatre-base) when its marker
-# (<manifest>.theatre) is there; a snapshot taken before EchoQueue changed would bring the old
+# (<manifest>.theatre) is there; a snapshot taken before EchoLazyTablet changed would bring the old
 # tablet data back.
 ECHOMODS = Path(os.environ.get('ECHOQUEUE_ECHOMODS_DIR') or Path(os.environ.get('APPDATA', '')) / 'EchoMods')  # tests: elsewhere
 
@@ -271,30 +274,33 @@ def echomods_present():
 
 
 def echomods_keep(game, on, log=print):
-    """Names EchoQueue in every Echo Mods profile (on), or takes it out again (off)."""
+    """Names EchoLazyTablet in every Echo Mods profile (on), or takes it out again (off)."""
     path = echomods_profiles()
     if not path.is_file():
         return
     try:
         data = json.loads(path.read_text(encoding='utf-8'))
     except ValueError:
-        log("Echo Mods' profiles file could not be read; switch EchoQueue on in Echo Mods yourself.")
+        log("Echo Mods' profiles file could not be read; switch EchoLazyTablet on in Echo Mods yourself.")
         return
     changed = False
     for p in data.get('profiles', []):
         plugins = p.setdefault('plugins', {})
-        if on and plugins.get('EchoQueue.dll') is not True:
-            plugins['EchoQueue.dll'] = True
+        if OLD_DLL in plugins:
+            del plugins[OLD_DLL]
             changed = True
-        elif not on and 'EchoQueue.dll' in plugins:
-            del plugins['EchoQueue.dll']
+        if on and plugins.get('EchoLazyTablet.dll') is not True:
+            plugins['EchoLazyTablet.dll'] = True
+            changed = True
+        elif not on and 'EchoLazyTablet.dll' in plugins:
+            del plugins['EchoLazyTablet.dll']
             changed = True
     if changed:
         backup = path.with_name('profiles.json.before-echoqueue')
         if not backup.exists():
             backup.write_bytes(path.read_bytes())
         _replace(path, json.dumps(data, indent=2).encode('utf-8'))
-        log('Echo Mods: EchoQueue ' + ('switched on in every profile, so Echo Mods keeps it on.' if on else 'taken out of its profiles.'))
+        log('Echo Mods: EchoLazyTablet ' + ('switched on in every profile, so Echo Mods keeps it on.' if on else 'taken out of its profiles.'))
     state_path = game.bin / 'echomods.json'
     if state_path.is_file():
         try:
@@ -302,14 +308,14 @@ def echomods_keep(game, on, log=print):
         except ValueError:
             return
         disabled = state.get('disabled', [])
-        kept = [d for d in disabled if str(d.get('file', '')).lower() != 'echoqueue.dll']
+        kept = [d for d in disabled if str(d.get('file', '')).lower() not in OUR_DLLS]
         if kept != disabled:
             state['disabled'] = kept
             _replace(state_path, json.dumps(state, indent=4).encode('utf-8'))
 
 
 def echomods_snapshot_stale(game, record):
-    """True when Echo Mods' lobby snapshot would bring back tablet data without the current EchoQueue."""
+    """True when Echo Mods' lobby snapshot would bring back tablet data without the current EchoLazyTablet."""
     marker, snapshot = game.manifests / (E.MID + '.theatre'), game.manifests / (E.MID + '.theatre-base')
     if not (marker.exists() and snapshot.exists() and record and record.get('schema') == 2):
         return False
@@ -327,7 +333,7 @@ def scan(game):
     info = dict(problems=check(game, need_closed=False), notes=[], plugins=[], state='not installed')
     if not is_game(game.folder):
         return info
-    info['plugins'] = [p for p in game.loader_plugins() if p.lower() != 'echoqueue.dll']
+    info['plugins'] = [p for p in game.loader_plugins() if p.lower() not in OUR_DLLS]
     m = game.load()
     record = None
     try:
@@ -335,10 +341,12 @@ def scan(game):
     except InstallError as e:
         info['notes'].append(str(e))
     n, _ = _ours(m, record)
-    dll = (game.plugins / 'EchoQueue.dll').exists()
+    dll = (game.plugins / 'EchoLazyTablet.dll').exists()
     if n is not None:
         info['state'] = f"installed (v{record.get('version', '?')})" if record and record.get('schema') == 2 else 'installed (first installer)'
-        if not dll or not (game.plugins / 'EchoQueue.layout').exists():
+        if not dll and (game.plugins / OLD_DLL).exists():
+            info['state'] += ' - EchoQueue is now EchoLazyTablet, use Repair to update'
+        elif not dll or not (game.plugins / 'EchoLazyTablet.layout').exists():
             info['state'] += ' - plugin files missing, use Repair'
     elif record or dll:
         info['state'] = 'PLAY tab missing (another tool rewrote the tablet data) - use Repair'
@@ -352,7 +360,7 @@ def scan(game):
         info['problems'].append(str(e))
     info['echomods'] = echomods_present()
     if info['echomods'] and n is not None and echomods_snapshot_stale(game, record):
-        info['notes'].append("Echo Mods' saved lobby snapshot is from before this EchoQueue: if Echo Mods rebuilds "
+        info['notes'].append("Echo Mods' saved lobby snapshot is from before this EchoLazyTablet: if Echo Mods rebuilds "
                              'the lobby, run Repair here afterwards.')
     return info
 
@@ -370,9 +378,9 @@ def _set_loader(game, present):
         config = json.loads(path.read_text()) if path.exists() else {'plugins': []}
     except ValueError:
         raise InstallError('bin\\win10\\echoloader.json is damaged; fix or delete it, then try again.')
-    plugins = [p for p in config.setdefault('plugins', []) if str(p.get('file', '')).lower() != 'echoqueue.dll']
+    plugins = [p for p in config.setdefault('plugins', []) if str(p.get('file', '')).lower() not in OUR_DLLS]
     if present:
-        plugins.append({'file': 'EchoQueue.dll', 'args': {}})
+        plugins.append({'file': 'EchoLazyTablet.dll', 'args': {}})
     config['plugins'] = plugins
     _replace(path, json.dumps(config, indent=4).encode())
 
@@ -392,18 +400,18 @@ def _no_stage(name):
 
 
 def install(game, log=print, stage=_no_stage):
-    """Install, or repair: EchoQueue out, then the tab rebuilt on the tablet as it is now.
+    """Install, or repair: EchoLazyTablet out, then the tab rebuilt on the tablet as it is now.
     stage(name) is called as it goes: check, build, write, verify, plugin (for a progress bar)."""
     stage('check')
     problems = check(game)
     if problems:
         raise InstallError('\n'.join(problems))
     payload = payload_dir()
-    if not (payload / 'EchoQueue.dll').is_file():
-        raise InstallError('The installer is missing EchoQueue.dll.')
+    if not (payload / 'EchoLazyTablet.dll').is_file():
+        raise InstallError('The installer is missing EchoLazyTablet.dll.')
     m, old, unused = without_echoqueue(game)
     if old is not None:
-        log(f'Took the existing EchoQueue out of the tablet data (package _{old}).')
+        log(f'Took the existing EchoLazyTablet out of the tablet data (package _{old}).')
     stage('build')
     try:
         built = tablet.build(m)
@@ -445,13 +453,21 @@ def install(game, log=print, stage=_no_stage):
     _replace(game.record, json.dumps(record, indent=1).encode())
     stage('plugin')
     game.plugins.mkdir(exist_ok=True)
-    _replace(game.plugins / 'EchoQueue.dll', (payload / 'EchoQueue.dll').read_bytes())
-    if not (game.plugins / 'EchoQueue.ini').exists():
-        _replace(game.plugins / 'EchoQueue.ini', (payload / 'EchoQueue.ini').read_bytes())
-    _replace(game.plugins / 'EchoQueue.layout', tablet.layout_ini(built['layout']).encode())
+    _replace(game.plugins / 'EchoLazyTablet.dll', (payload / 'EchoLazyTablet.dll').read_bytes())
+    old_ini = game.plugins / OLD_INI
+    if not (game.plugins / 'EchoLazyTablet.ini').exists():
+        if old_ini.exists():   # from EchoQueue: the player's settings carry over
+            _replace(game.plugins / 'EchoLazyTablet.ini', old_ini.read_bytes())
+            log('Your EchoQueue settings were carried over to EchoLazyTablet.ini.')
+        else:
+            _replace(game.plugins / 'EchoLazyTablet.ini', (payload / 'EchoLazyTablet.ini').read_bytes())
+    for name in (OLD_DLL, OLD_LAYOUT, OLD_INI):
+        if (game.plugins / name).exists():
+            (game.plugins / name).unlink()
+    _replace(game.plugins / 'EchoLazyTablet.layout', tablet.layout_ini(built['layout']).encode())
     _set_loader(game, True)
     echomods_keep(game, True, log)
-    log(f"Installed EchoQueue v{VERSION}: PLAY tab added to package _{number}, {built['tabs']} tabs on the bar.")
+    log(f"Installed EchoLazyTablet v{VERSION}: PLAY tab added to package _{number}, {built['tabs']} tabs on the bar.")
     return built
 
 
@@ -470,7 +486,7 @@ def launch(game):
 def uninstall(game, log=print, stage=_no_stage):
     stage('check')
     problems = check(game)
-    if problems and not any('not the one EchoQueue' in p or 'EchoLoader' in p for p in problems):
+    if problems and not any('not the one EchoLazyTablet' in p or 'EchoLoader' in p for p in problems):
         raise InstallError('\n'.join(problems))
     if echo_running():
         raise InstallError('Echo VR is running. Close it first.')
@@ -490,10 +506,10 @@ def uninstall(game, log=print, stage=_no_stage):
         if p.exists():
             p.unlink()
     stage('plugin')
-    for name in ('EchoQueue.dll', 'EchoQueue.layout'):
+    for name in ('EchoLazyTablet.dll', 'EchoLazyTablet.layout', OLD_DLL, OLD_LAYOUT):
         p = game.plugins / name
         if p.exists():
             p.unlink()
     _set_loader(game, False)
     echomods_keep(game, False, log)
-    log('Removed the EchoQueue plugin. Your settings (plugins\\EchoQueue.ini) and log are kept.')
+    log('Removed the EchoLazyTablet plugin. Your settings (plugins\\EchoLazyTablet.ini) and log are kept.')

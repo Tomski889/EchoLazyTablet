@@ -1,5 +1,5 @@
 @echo off
-rem Builds dist\EchoQueue.dll with llvm-mingw (on PATH, or set CXX).
+rem Builds dist\EchoLazyTablet.dll with llvm-mingw (on PATH, or set CXX).
 setlocal
 cd /d "%~dp0"
 if "%CXX%"=="" for %%c in (x86_64-w64-mingw32-clang++.exe) do set "CXX=%%~$PATH:c"
@@ -11,9 +11,9 @@ set MH=vendor\minhook\src
 for %%f in (%MH%\buffer.c %MH%\hook.c %MH%\trampoline.c %MH%\hde\hde64.c) do (
   "%CC%" -O2 -c %%f -o build\%%~nf.o || exit /b 1
 )
-"%CXX%" -std=c++17 -O2 -shared -static -Wall -o dist\EchoQueue.dll ^
+"%CXX%" -std=c++17 -O2 -shared -static -Wall -o dist\EchoLazyTablet.dll ^
   src\echo_queue.cpp build\buffer.o build\hook.o build\trampoline.o build\hde64.o ^
   -Wl,--kill-at -luser32 -lkernel32 -lwinhttp
 if errorlevel 1 exit /b 1
-copy /y EchoQueue.ini dist\EchoQueue.ini >nul
-echo built dist\EchoQueue.dll
+copy /y EchoLazyTablet.ini dist\EchoLazyTablet.ini >nul
+echo built dist\EchoLazyTablet.dll

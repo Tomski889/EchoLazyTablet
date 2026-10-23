@@ -21,7 +21,7 @@ import player
 TOKEN = secrets.token_urlsafe(24)
 BYE_AT = None             # when the page last said goodbye (closing, or reloading)
 LAST_SEEN = None          # when the window last called (it polls every 0.6 s)
-ISSUES = 'https://github.com/Tomski889/EchoQueue/issues/new'   # where Report a bug goes
+ISSUES = 'https://github.com/Tomski889/EchoLazyTablet/issues/new'   # where Report a bug goes
 WEB = Path(getattr(sys, '_MEIPASS', Path(__file__).resolve().parent)) / 'web'
 TYPES = {'.html': 'text/html; charset=utf-8', '.css': 'text/css', '.js': 'application/javascript', '.svg': 'image/svg+xml'}
 
@@ -92,7 +92,7 @@ class State:
                 (patcher.install if kind == 'install' else patcher.uninstall)(game, log=log, stage=stage)
                 ok = True
                 message = ('Start Echo VR: PLAY is the first tab on your hand tablet.' if kind == 'install'
-                           else 'EchoQueue has been removed. Your other mods are as they were.')
+                           else 'EchoLazyTablet has been removed. Your other mods are as they were.')
             except patcher.InstallError as e:
                 message = str(e)
             except PermissionError as e:
@@ -209,7 +209,7 @@ class Handler(BaseHTTPRequestHandler):
         if path == '/api/bug':
             import webbrowser
             from urllib.parse import urlencode
-            body = (f'**EchoQueue version:** {patcher.VERSION}\n\n**What happened:**\n\n\n'
+            body = (f'**EchoLazyTablet version:** {patcher.VERSION}\n\n**What happened:**\n\n\n'
                     '**What you expected:**\n\n\n**Steps to make it happen again:**\n1. \n')
             webbrowser.open(ISSUES + '?' + urlencode(dict(title='Bug: ', body=body, labels='bug')))
             return self.send(200, {})
@@ -236,7 +236,7 @@ def own_window(url):
     except Exception:
         return False
     try:
-        WINDOW = webview.create_window('EchoQueue', url, width=1000, height=780, min_size=(760, 600),
+        WINDOW = webview.create_window('EchoLazyTablet', url, width=1000, height=780, min_size=(760, 600),
                                        background_color='#070a10')
         webview.start(gui='edgechromium', private_mode=True)
         return True
@@ -265,7 +265,7 @@ def run():
         import webbrowser
         webbrowser.open(url)
         threading.Event().wait()
-    profile = Path(os.environ.get('LOCALAPPDATA', '.')) / 'EchoQueue' / 'window'
+    profile = Path(os.environ.get('LOCALAPPDATA', '.')) / 'EchoLazyTablet' / 'window'
     profile.mkdir(parents=True, exist_ok=True)
     window = subprocess.Popen([browser, f'--app={url}', f'--user-data-dir={profile}', '--window-size=1000,780',
                                '--no-first-run', '--no-default-browser-check'])

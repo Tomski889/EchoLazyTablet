@@ -1,4 +1,4 @@
-"""EchoQueue's icon glyphs, drawn in the tablet's flat white style (4x supersampled).
+"""EchoLazyTablet's icon glyphs, drawn in the tablet's flat white style (4x supersampled).
 
 disc():   the Echo Arena disc seen from above, after the in-game disc: four thick rim segments,
           a thin inner ring split the same way, two curved arcs round the hub, a plain centre.

@@ -1,12 +1,12 @@
-// EchoQueue.dll -- EchoLoader plugin: queue for an Echo Arena match from the hand tablet.
+// EchoLazyTablet.dll -- EchoLoader plugin: queue for an Echo Arena match from the hand tablet.
 //
 //   * PLAY tab on the hand tablet (data built by tools/build_queue_tab.py): its START ARENA
 //     button asks for a public Echo Arena match, and the page shows the matchmaking state;
 //   * LOBBY on that page: leaves the match you're in for the social lobby;
-//   * PRIVATE MATCH: creates a private Echo Arena match on the server set in EchoQueue.ini;
+//   * PRIVATE MATCH: creates a private Echo Arena match on the player's lowest-ping server;
 //   * F9 (Echo's window focused) does the same as START;
 //   * logs every matchmaking request the game makes, and saves the settings of a public
-//     Echo Arena request to EchoQueue.ini so ours match the game's exactly.
+//     Echo Arena request to EchoLazyTablet.ini so ours match the game's exactly.
 //
 // The tablet runtime (canvas discovery, page switching, native button gating and event
 // dispatch) follows Echo Arcade (kotorvr/echo-arcade), which follows heisthecat31/Doom-on-EchoVR.
@@ -105,7 +105,7 @@ constexpr U ECHO_ARENA = 0xcb60a4de7e1caf73, NONE = ~0ull;
 constexpr U ECHO_ARENA_PRIVATE = 0x09990965f4db8c03, MPL_ARENA_A = 0x576ed3f8428ebc4b;  // echo_arena_private, its arena
 // Sounds: Wwise is linked into echovr.exe, which exports AK::SoundEngine::PostEvent(eventID,
 // gameObject, ...) at 0x138f240. Stock tablet buttons get their sounds from the tablet's
-// scripts, ours have none, so EchoQueue posts the same Wwise events on the tablet's sound
+// scripts, ours have none, so EchoLazyTablet posts the same Wwise events on the tablet's sound
 // object. Event IDs were read off the game's own presses (tab click, mute, unmute); the
 // tablet's object is taken from the game's own use of those events (0x3eb until then).
 constexpr unsigned RVA_POST_EVENT = 0x138f240;
@@ -123,9 +123,9 @@ constexpr U PRESS = 0xfdb213d9dc5e4826, RELEASE = 0xd7ded077f321f69b;
 constexpr U TABLET_ACTOR = 0x6c1f6ff04e070923;
 constexpr U STOCK_TAB_FIRST = 0x275876572b742791, STOCK_TAB_LAST = 0x275876572b742794;
 // Echo Arcade's ARCADE and SETTINGS tabs (kotorvr/echo-arcade, native/generated/arcade_tab.h):
-// pressing one opens its page over ours. Other mods' tabs come from EchoQueue.layout's other_tabs.
+// pressing one opens its page over ours. Other mods' tabs come from EchoLazyTablet.layout's other_tabs.
 constexpr U ECHO_ARCADE_TABS[] = {0xc5a79e9d89b4bc0f, 0x51a014bc63ecbedb};
-// The disable bit EchoQueue sets on buttons. Echo Arcade (and Doom-on-EchoVR) own 0x8000, so
+// The disable bit EchoLazyTablet sets on buttons. Echo Arcade (and Doom-on-EchoVR) own 0x8000, so
 // sharing it made whichever mod came second find it "taken" and switch itself off.
 constexpr unsigned short MASK_BIT = 0x4000;
 constexpr U CONTENT[] = {0x5071f3ac46630320, 0x645c2234c519a275, 0x645c2234c519a276, 0x645c2234c519a277,
@@ -197,7 +197,7 @@ PostEvent postEventOriginal = nullptr;
 Show showFn; Text textFn; Alpha alphaFn; Mask enableFn, disableFn;
 
 // Redraw counters for the perf line in the log (each of these makes the tablet redraw).
-// Also EchoQueue's own time in the per-frame and per-sound hooks.
+// Also EchoLazyTablet's own time in the per-frame and per-sound hooks.
 struct Perf { std::atomic<U> show{0}, text{0}, alpha{0}, mask{0}, ticks{0}, ns{0}, hookNs{0}, frames{0}, soundNs{0}, sounds{0}; } perf;
 U qpcNs();
 U show(void* c, unsigned e, int v) { perf.show++; return showFn(c, e, v); }
@@ -234,11 +234,11 @@ std::atomic<int> matchPublic{-1};     // API: 1 public match, 0 private match or
 std::atomic<int> searchKind{KIND_UNKNOWN}, loadedKind{KIND_UNKNOWN};
 std::atomic<U> matchmakingSeenAt{0};  // when the lobby was last seen searching / joining
 
-// EchoQueue turned off for this Echo account by its author (the access service, accessWatch):
+// EchoLazyTablet turned off for this Echo account by its author (the access service, accessWatch):
 // no searches, private matches or LOBBY.
 std::atomic<bool> accessBlocked{false};
 
-// What the stats box shows; tapping it steps to the next ([stats] show in EchoQueue.ini).
+// What the stats box shows; tapping it steps to the next ([stats] show in EchoLazyTablet.ini).
 enum { STAT_TODAY, STAT_OVERALL, STAT_PLAYERS, STAT_MODES };
 constexpr const char* STAT_CAPTIONS[STAT_MODES] = {"HOURS TODAY", "MATCHES OVERALL", "PLAYERS ONLINE"};
 std::atomic<int> statMode{STAT_TODAY};
@@ -259,7 +259,7 @@ std::condition_variable logWake;
 std::deque<std::string> logQueue;
 
 void logWriter() {
-    std::wstring path = dir + L"\\EchoQueue.log";
+    std::wstring path = dir + L"\\EchoLazyTablet.log";
     for (;;) {
         std::deque<std::string> lines;
         {
@@ -299,7 +299,7 @@ bool readable(const void* p, size_t n) {
     return static_cast<const P>(const_cast<void*>(p)) + n <= static_cast<P>(m.BaseAddress) + m.RegionSize;
 }
 
-std::wstring iniPath() { return dir + L"\\EchoQueue.ini"; }
+std::wstring iniPath() { return dir + L"\\EchoLazyTablet.ini"; }
 
 U readHex(const wchar_t* section, const wchar_t* key, U fallback) {
     wchar_t buffer[64];
@@ -321,16 +321,16 @@ int parseKey(const wchar_t* name) {
     return VK_F9;
 }
 
-// PRIVATE MATCH goes to one game server: [private] server / ports in EchoQueue.ini, by default
-// Maidenhead, England (80.64.218.95, which runs five match slots on ports 6792..6796). The
-// slot that last worked is tried first ([private] last_port).
+// With [private] use_server=1, PRIVATE MATCH goes to one game server: [private] server / ports
+// in EchoLazyTablet.ini (e.g. Maidenhead, England: 80.64.218.95, five match slots on ports
+// 6792..6796). The slot that last worked is tried first ([private] last_port).
 std::string privateServer;
 uint32_t privateIp = 0;                // network byte order, 0 = let the server choose
 std::vector<uint16_t> privatePorts;
 
 // Private matches go where EchoVRCE's matchmaker puts them, which is the game server with the
 // lowest ping for the player creating it (from the pings Echo measures to every server while
-// matchmaking). [private] use_server=1 pins them to [private] server instead (older EchoQueue
+// matchmaking). [private] use_server=1 pins them to [private] server instead (older EchoLazyTablet
 // pinned Maidenhead for everyone, which was far away for players outside the UK).
 void loadPrivateServer() {
     wchar_t buffer[128];
@@ -372,7 +372,7 @@ void loadSettings() {
         captured.level = readHex(L"captured", L"level", NONE);
         captured.group = readHex(L"captured", L"group", NONE);
         haveCaptured = true;
-        logf("settings: hotkey F%d, using the Echo Arena request saved in EchoQueue.ini", hotkey - VK_F1 + 1);
+        logf("settings: hotkey F%d, using the Echo Arena request saved in EchoLazyTablet.ini", hotkey - VK_F1 + 1);
     } else {
         logf("settings: hotkey F%d, no saved Echo Arena request yet (built-in defaults until you queue once the normal way)", hotkey - VK_F1 + 1);
     }
@@ -409,7 +409,7 @@ void findDetour(void* netgame, FindParams* p) {
             writeHex(L"access", p->access); writeHex(L"field1", p->field1); writeHex(L"field3", p->field3);
             writeHex(L"field4", p->field4); writeHex(L"gametype", p->gametype); writeHex(L"level", p->level);
             writeHex(L"group", p->group);
-            logf("saved this public Echo Arena request to EchoQueue.ini");
+            logf("saved this public Echo Arena request to EchoLazyTablet.ini");
         }
     }
     findOriginal(netgame, p);
@@ -539,7 +539,7 @@ bool createOnServer(void* netgame, int index) {
 // `createPrivate`: create a private match instead of searching for a public one.
 Queued queueNow(bool createPrivate = false) {
     DWORD thread = GetCurrentThreadId();
-    if (accessBlocked) { logf("queue: EchoQueue is turned off for this account"); return Queued::Blocked; }
+    if (accessBlocked) { logf("queue: EchoLazyTablet is turned off for this account"); return Queued::Blocked; }
     if (gameThread != 0 && gameThread != thread) { logf("queue: thread %lu isn't the game's thread %lu; not queueing (send this log)", thread, DWORD(gameThread)); return Queued::WrongThread; }
     void* netgame = netGame();
     if (!netgame) { logf("queue: the game isn't ready (no net game yet)"); return Queued::NotReady; }
@@ -573,7 +573,7 @@ constexpr UINT WM_QUEUE = WM_APP + 0x51, WM_JOIN = WM_APP + 0x52, WM_CANCEL = WM
                WM_PRIVATE = WM_APP + 0x55, WM_PRIVATE_NEXT = WM_APP + 0x56;  // wparam: the slot to try
 
 // Echo's window thread only, like queueNow.
-// `announce`: play the announcer's "Matchmaking Cancelled" for a search EchoQueue started (a
+// `announce`: play the announcer's "Matchmaking Cancelled" for a search EchoLazyTablet started (a
 // terminal's search gets it from the terminal's own script).
 bool cancelNow(const char* why, bool announce = false) {
     void* netgame = netGame();
@@ -1071,7 +1071,7 @@ void joinTick() {
 DWORD apiSession(std::string& body) {
     static HINTERNET session = nullptr, connection = nullptr;
     if (!session) {
-        session = WinHttpOpen(L"EchoQueue", WINHTTP_ACCESS_TYPE_NO_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+        session = WinHttpOpen(L"EchoLazyTablet", WINHTTP_ACCESS_TYPE_NO_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
         if (!session) return 0;
         WinHttpSetTimeouts(session, 300, 300, 300, 500);
         connection = WinHttpConnect(session, L"127.0.0.1", API_PORT, 0);
@@ -1112,7 +1112,7 @@ std::string jsonString(const std::string& body, const char* key) {
 }
 
 // ---- hours today ----
-// Time Echo has been running today, added up across sessions in EchoQueue.ini ([stats] day /
+// Time Echo has been running today, added up across sessions in EchoLazyTablet.ini ([stats] day /
 // seconds_today, saved once a minute) and back to 0 on a new (local) day.
 std::mutex statsMutex;
 std::wstring statsDay;  // the day secondsToday counts, YYYY-MM-DD
@@ -1258,7 +1258,7 @@ std::atomic<U> playersWantedAt{0};
 int fetchPlayersOnline() {
     static HINTERNET session = nullptr, connection = nullptr;
     if (!session) {
-        session = WinHttpOpen(L"EchoQueue", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+        session = WinHttpOpen(L"EchoLazyTablet", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
         if (!session) return -1;
         WinHttpSetTimeouts(session, 5000, 5000, 5000, 10000);
         connection = WinHttpConnect(session, L"g.echovrce.com", INTERNET_DEFAULT_HTTPS_PORT, 0);
@@ -1299,12 +1299,12 @@ DWORD WINAPI playersWatch(LPVOID) {
 }
 
 // ---- access ----
-// Whether EchoQueue may be used on this Echo account, as its author's access service says
+// Whether EchoLazyTablet may be used on this Echo account, as its author's access service says
 // (server/worker.js). On its own thread: shortly after Echo starts and every 15 minutes it
 // sends the account's ID and display name from the saved profile (xplatformid, displayname)
-// and gets back blocked or not. The answer is kept in EchoQueue.ini ([access] blocked) for
-// when the service can't be reached; with no answer ever, EchoQueue stays on.
-constexpr const char* ECHOQUEUE_VERSION = "3.12";
+// and gets back blocked or not. The answer is kept in EchoLazyTablet.ini ([access] blocked) for
+// when the service can't be reached; with no answer ever, EchoLazyTablet stays on.
+constexpr const char* ECHOQUEUE_VERSION = "3.13";
 constexpr const wchar_t* ACCESS_HOST = L"echoqueue.dokuyegar.workers.dev";  // the deployed Worker (server/worker.js)
 constexpr U ACCESS_EVERY_MS = 15 * 60 * 1000;
 
@@ -1320,7 +1320,7 @@ std::string jsonEscape(const std::string& s) {
 
 // 1 blocked, 0 allowed, -1 no answer.
 int checkIn(const std::wstring& host, const std::string& id, const std::string& name) {
-    HINTERNET session = WinHttpOpen(L"EchoQueue", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+    HINTERNET session = WinHttpOpen(L"EchoLazyTablet", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
     if (!session) return -1;
     WinHttpSetTimeouts(session, 5000, 5000, 5000, 10000);
     HINTERNET connection = WinHttpConnect(session, host.c_str(), INTERNET_DEFAULT_HTTPS_PORT, 0);
@@ -1366,7 +1366,7 @@ DWORD WINAPI accessWatch(LPVOID) {
     GetPrivateProfileStringW(L"access", L"server", ACCESS_HOST, buffer, 256, iniPath().c_str());
     std::wstring host = buffer;
     accessBlocked = GetPrivateProfileIntW(L"access", L"blocked", 0, iniPath().c_str()) != 0;
-    if (accessBlocked) logf("access: EchoQueue is turned off for this account (last answer from the access service)");
+    if (accessBlocked) logf("access: EchoLazyTablet is turned off for this account (last answer from the access service)");
     if (host.empty()) return 0;
     Sleep(20000);  // let Echo log in and save the profile first
     for (;;) {
@@ -1375,7 +1375,7 @@ DWORD WINAPI accessWatch(LPVOID) {
             int blocked = checkIn(host, id, name);
             if (blocked >= 0 && accessBlocked.exchange(blocked != 0) != (blocked != 0)) {
                 WritePrivateProfileStringW(L"access", L"blocked", blocked ? L"1" : L"0", iniPath().c_str());
-                logf("access: EchoQueue is %s for this account", blocked ? "turned OFF" : "on again");
+                logf("access: EchoLazyTablet is %s for this account", blocked ? "turned OFF" : "on again");
             }
         }
         Sleep(DWORD(ACCESS_EVERY_MS));
@@ -1442,12 +1442,12 @@ DWORD WINAPI matchWatch(LPVOID) {
 // ones are drawn over ours, so while PLAY is up they are faded out with the canvas opacity:
 // the game's scripts show/hide them (re-hiding meant a redraw every frame) but leave opacity alone.
 // Which canvas is which, and where our elements are in the shared ones, depends on what other
-// tablet mods added: the installer measures this PC's tablet and writes it to EchoQueue.layout
+// tablet mods added: the installer measures this PC's tablet and writes it to EchoLazyTablet.layout
 // (each canvas: element count, plus an index whose name tells it apart from every other canvas
 // with that many elements).
 constexpr unsigned KINDS = 7, FIRST_STOCK = 3;
 constexpr unsigned CANVAS_OPACITY = 0x358;
-// Kind 2 is EchoQueue's overlay canvas (page, title strip, tab icon), shown by the root's spare
+// Kind 2 is EchoLazyTablet's overlay canvas (page, title strip, tab icon), shown by the root's spare
 // stock element 6 so that no canvas other mods count changes its element count.
 struct Layout {
     unsigned counts[KINDS] = {}, markerIndex[KINDS] = {};
@@ -1481,9 +1481,9 @@ std::vector<unsigned> readList(const wchar_t* key, const std::wstring& path) {
 
 // -> false (and the reason logged) when the layout is missing or not for this build.
 bool loadLayout() {
-    std::wstring path = dir + L"\\EchoQueue.layout";
+    std::wstring path = dir + L"\\EchoLazyTablet.layout";
     if (GetPrivateProfileIntW(L"tablet", L"version", 0, path.c_str()) != QUEUE_LAYOUT_VERSION) {
-        logf("tablet: EchoQueue.layout missing, unreadable or from another EchoQueue version -- run the EchoQueue installer's Repair");
+        logf("tablet: EchoLazyTablet.layout missing, unreadable or from another EchoLazyTablet version -- run the EchoLazyTablet installer's Repair");
         return false;
     }
     const wchar_t* names[KINDS] = {L"root", L"nav", L"overlay", L"lobby", L"rows", L"settings", L"title"};
@@ -1493,7 +1493,7 @@ bool loadLayout() {
         GetPrivateProfileStringW(L"tablet", names[k], L"", buffer, 64, path.c_str());
         if (swscanf(buffer, L"%u,%u,%llx", &layout.counts[k], &layout.markerIndex[k], &marker) != 3 ||
             layout.markerIndex[k] >= layout.counts[k]) {
-            logf("tablet: EchoQueue.layout has no valid '%ls' entry -- run the installer's Repair", names[k]);
+            logf("tablet: EchoLazyTablet.layout has no valid '%ls' entry -- run the installer's Repair", names[k]);
             return false;
         }
         layout.markers[k] = marker;
@@ -1505,14 +1505,14 @@ bool loadLayout() {
     layout.otherTabs = readHexList(L"other_tabs", path);
     layout.otherTabs.insert(layout.otherTabs.end(), std::begin(ECHO_ARCADE_TABS), std::end(ECHO_ARCADE_TABS));
     if (layout.counts[2] != QUEUE_OVERLAY_ELEMENTS || get(L"overlay_elements") != QUEUE_OVERLAY_ELEMENTS) {
-        logf("tablet: EchoQueue.layout is for a different EchoQueue version -- run the installer's Repair");
+        logf("tablet: EchoLazyTablet.layout is for a different EchoLazyTablet version -- run the installer's Repair");
         return false;
     }
     unsigned navMax = 0;
     for (unsigned i : layout.navStockSelected) navMax = std::max(navMax, i);
     for (unsigned i : layout.navOtherSelected) navMax = std::max(navMax, i);
     if (layout.rootSlot >= layout.counts[0] || navMax >= layout.counts[1]) {
-        logf("tablet: EchoQueue.layout points outside the tablet -- run the installer's Repair");
+        logf("tablet: EchoLazyTablet.layout points outside the tablet -- run the installer's Repair");
         return false;
     }
     logf("tablet: layout for %u root / %u tab bar elements, %zu other tab(s)' highlights",
@@ -1546,7 +1546,7 @@ std::map<void*, std::pair<void*, unsigned>> canvases;       // canvas -> (gamesp
 std::set<void*> pending;
 std::set<std::array<U, 3>> held;                            // (gamespace, actor, component)
 // PLAY pressed while another mod's page was up: that mod only closes its page for a stock tab,
-// so EchoQueue sends one (press and release, through the hooked dispatch so every mod sees it)
+// so EchoLazyTablet sends one (press and release, through the hooked dispatch so every mod sees it)
 // from the next button update, outside the lock. Our own handler ignores it.
 struct Kick { void* gs = nullptr; U actor = 0, tab = 0; int arg = 0; } kick;
 thread_local bool sendingKick = false;
@@ -1595,7 +1595,7 @@ std::string statusFor(int state) {
         return "MATCH FOUND - JOINING...";
     }
     if (state == 8) return "JOINING THE MATCH...";
-    if (accessBlocked) return "ECHOQUEUE IS OFF FOR THIS ACCOUNT";
+    if (accessBlocked) return "ECHOLAZYTABLET IS OFF FOR THIS ACCOUNT";
     if (inPublicMatch()) return "PUBLIC MATCH - QUEUE WHEN IT ENDS";
     return "TAP FIND MATCH TO QUEUE";
 }
@@ -1663,10 +1663,10 @@ void render(Context& c) {
         bool searching = matchmaking(state);
         Queued r = Queued(lastResult.load());
         if (r != Queued::None && now - lastResultAt < 3000 && r != Queued::Started) {
-            c.flash = r == Queued::Blocked ? "ECHOQUEUE IS OFF FOR THIS ACCOUNT"
+            c.flash = r == Queued::Blocked ? "ECHOLAZYTABLET IS OFF FOR THIS ACCOUNT"
                     : r == Queued::PublicMatch ? "IN A PUBLIC MATCH - FINISH IT FIRST"
                     : r == Queued::AlreadySearching ? "ALREADY SEARCHING"
-                    : r == Queued::NotReady ? "NOT READY YET - TRY AGAIN IN A MOMENT" : "COULDN'T QUEUE - SEE ECHOQUEUE.LOG";
+                    : r == Queued::NotReady ? "NOT READY YET - TRY AGAIN IN A MOMENT" : "COULDN'T QUEUE - SEE ECHOLAZYTABLET.LOG";
             c.flashUntil = lastResultAt + 3000;
         }
         std::string message = now < c.flashUntil && !searching ? c.flash : statusFor(state);
@@ -1801,7 +1801,7 @@ void buttonTick(void* cs) {
     nsRender += qpcNs() - t2;
 }
 
-// Every 5 s while anything happened: how often the hook ran, EchoQueue's own time in it,
+// Every 5 s while anything happened: how often the hook ran, EchoLazyTablet's own time in it,
 // and how many redraw-causing calls it made.
 void perfReport() {
     static U last = 0;
@@ -1816,8 +1816,8 @@ void perfReport() {
     bool page = false;
     for (auto& [gs, c] : contexts) page |= c.page == Page::Queue;
     U hk = nsHousekeeping.exchange(0), g = nsGate.exchange(0), r = nsRender.exchange(0);
-    // Every 30 s: the headset frame rate, and EchoQueue's own time per second on Echo's threads.
-    logf("perf: headset %.1f fps; EchoQueue %.3f ms/s on Echo's threads (tablet %.3f: housekeeping %.3f, buttons %.3f, page %.3f; "
+    // Every 30 s: the headset frame rate, and EchoLazyTablet's own time per second on Echo's threads.
+    logf("perf: headset %.1f fps; EchoLazyTablet %.3f ms/s on Echo's threads (tablet %.3f: housekeeping %.3f, buttons %.3f, page %.3f; "
          "frame hook %.3f; sound hook %.3f for %.0f sounds/s); tablet redraws/s: show %.1f text %.1f alpha %.1f masks %.1f; "
          "%.0f tablet updates/s (PLAY page %s)",
          frames / secs, (ns + hookNs + soundNs) / 1e6 / secs, ns / 1e6 / secs, hk / 1e6 / secs, g / 1e6 / secs, r / 1e6 / secs,
@@ -1929,7 +1929,7 @@ void onEvent(void* gs, U event, U actor, U component, int arg) {
     } else if (component == QUEUE_LOBBY && c.page == Page::Queue) {
         logf("tablet: LOBBY pressed (%s)", inMatch ? "in a match" : "not in a match");
         playSound(SOUND_CLICK);
-        if (accessBlocked) { c.flash = "ECHOQUEUE IS OFF FOR THIS ACCOUNT"; c.flashUntil = GetTickCount64() + 3000; return; }
+        if (accessBlocked) { c.flash = "ECHOLAZYTABLET IS OFF FOR THIS ACCOUNT"; c.flashUntil = GetTickCount64() + 3000; return; }
         c.flash = inMatch ? "HEADING TO THE LOBBY..." : "YOU'RE ALREADY IN THE LOBBY";
         c.flashUntil = GetTickCount64() + 3000;
         if (inMatch && !fault) startFade(WM_RETURN, "the lobby");
@@ -2066,8 +2066,8 @@ void installTablet() {
 }
 
 void initialize() {
-    logf("EchoQueue v3.12 starting (pid %lu)", GetCurrentProcessId());
-    if (!verifyExecutable()) { fault = tabletFault = true; logf("EchoQueue disabled"); return; }
+    logf("EchoLazyTablet v3.13 starting (pid %lu)", GetCurrentProcessId());
+    if (!verifyExecutable()) { fault = tabletFault = true; logf("EchoLazyTablet disabled"); return; }
     loadSettings();
     loadToday();
     voiceJoiningMatch = uint32_t(readHex(L"sounds", L"joining_match", 0));

@@ -1,6 +1,6 @@
-"""EchoQueueInstaller.exe: opens the installer window (webapp.py), or without a window:
+"""EchoLazyTabletInstaller.exe: opens the installer window (webapp.py), or without a window:
 
-    EchoQueueInstaller.exe --scan|--install|--uninstall "<game folder>" "<report.txt>"
+    EchoLazyTabletInstaller.exe --scan|--install|--uninstall "<game folder>" "<report.txt>"
 
 writes what happened to the report (for support, and for testing the built installer)."""
 import sys
