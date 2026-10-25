@@ -1,4 +1,4 @@
-EchoLazyTablet 3.14 - Echo Arena matchmaking from your hand tablet (Echo VR, EchoVRCE)
+EchoLazyTablet 3.15 - Echo Arena matchmaking from your hand tablet (Echo VR, EchoVRCE)
 
 What it does
   A PLAY tab, first on the hand tablet's tab bar:

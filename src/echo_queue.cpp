@@ -1708,7 +1708,7 @@ DWORD WINAPI playersWatch(LPVOID) {
 // sends the account's ID and display name from the saved profile (xplatformid, displayname)
 // and gets back blocked or not. The answer is kept in EchoLazyTablet.ini ([access] blocked) for
 // when the service can't be reached; with no answer ever, EchoLazyTablet stays on.
-constexpr const char* ECHOQUEUE_VERSION = "3.14";
+constexpr const char* ECHOQUEUE_VERSION = "3.15";
 constexpr const wchar_t* ACCESS_HOST = L"echoqueue.dokuyegar.workers.dev";  // the deployed Worker (server/worker.js)
 constexpr U ACCESS_EVERY_MS = 15 * 60 * 1000;
 
@@ -2718,6 +2718,19 @@ void onEvent(void* gs, U event, U actor, U component, int arg) {
     std::array<U, 3> key = {reinterpret_cast<U>(gs), actor, component};
     if (event == RELEASE) { held.erase(key); return; }
     if (!held.insert(key).second) return;  // still held: one press, one action
+    // A finger still on the tablet sets off the button that replaces the one just pressed (FIND
+    // MATCH started a search and CANCEL SEARCH, in its place, stopped it 80 ms later) or its
+    // neighbour (LOW 1.3 s after HIGH): another of the page's buttons within a second is ignored.
+    // The keyboard's keys are typed in quick succession, so they're left out.
+    if (isOurs(component) && component != QUEUE_TAB && !keyFor(component)) {
+        static U lastAt = 0, lastButton = 0;
+        U now = GetTickCount64();
+        if (component != lastButton && now - lastAt < 1000) {
+            logf("tablet: button %016llx ignored (%llu ms after another)", component, now - lastAt);
+            return;
+        }
+        lastAt = now, lastButton = component;
+    }
     if (isStockTab(component)) {
         if (c.page == Page::Queue) logf("tablet: left the PLAY page");
         c.page = Page::Stock;
@@ -2946,7 +2959,7 @@ void installTablet() {
 }
 
 void initialize() {
-    logf("EchoLazyTablet v3.14 starting (pid %lu)", GetCurrentProcessId());
+    logf("EchoLazyTablet v3.15 starting (pid %lu)", GetCurrentProcessId());
     graphicsStartup();   // first: Echo reads its settings soon after start
     if (liveTextures()) texlod::loadAll();
     if (!verifyExecutable()) { fault = tabletFault = true; logf("EchoLazyTablet disabled"); return; }
