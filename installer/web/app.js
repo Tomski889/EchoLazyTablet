@@ -13,9 +13,12 @@ const ICONS = {
   install: '<path d="M12 3v12m0 0l-5-5m5 5l5-5M4 19h16" />',
   repair: '<path d="M14.7 6.3a4 4 0 00-5.4 5.4L3 18l3 3 6.3-6.3a4 4 0 005.4-5.4l-2.6 2.6-2.4-.6-.6-2.4z" />',
 };
+// The installer's wrong-build message (patcher.check); other messages may say "rebuild".
+const WRONG_BUILD = /Echo VR build is not the one/;
 const STAGES = {
   install: [['check', 'Checking your game'], ['build', 'Building your PLAY tab'], ['write', 'Installing the tab'],
-            ['verify', 'Double-checking'], ['plugin', 'Adding the EchoLazyTablet plugin']],
+            ['verify', 'Double-checking'], ['plugin', 'Adding the EchoLazyTablet plugin'],
+            ['graphics', 'Making the LOW graphics files (a minute or two)']],
   uninstall: [['check', 'Checking your game'], ['write', 'Taking the PLAY tab out'], ['plugin', 'Removing the plugin']],
 };
 
@@ -40,7 +43,7 @@ function situation(v) {
   if (!s && v.scanning) return { kind: 'busy', title: 'Getting ready…', text: 'Looking at your game and its hand tablet.' };
   if (!s || s.found === false) return { kind: 'bad', title: "Can't find Echo VR", text: 'Show us where it is: pick the folder called ready-at-dawn-echo-arena.', action: 'browse' };
   const p = s.problems.join(' ');
-  if (/build/.test(p)) return { kind: 'bad', title: 'Different Echo VR version', text: 'EchoLazyTablet is made for Echo VR build 1683152886.' };
+  if (WRONG_BUILD.test(p)) return { kind: 'bad', title: 'Different Echo VR version', text: s.problems.find((x) => WRONG_BUILD.test(x)) };
   if (/EchoLoader/.test(p)) return { kind: 'bad', title: 'EchoLoader needed', text: 'Install EchoLoader first: EchoLazyTablet runs as one of its plugins.' };
   if (s.problems.some((x) => !/running/.test(x))) return { kind: 'bad', title: "Can't add the tab", text: s.problems.filter((x) => !/running/.test(x)).join('\n') };
   const running = /running/.test(p);
@@ -66,7 +69,7 @@ function renderMain(v) {
     const p = s.problems.join(' ');
     const pill = (ok, text) => { const e = el('span', 'pill' + (ok ? '' : ' bad')); const i = el('i', '', ok ? '✓' : '!'); e.append(i, text); pills.append(e); };
     pill(true, 'Echo VR found');
-    pill(!/build/.test(p), 'Right version');
+    pill(!WRONG_BUILD.test(p), 'Right version');
     pill(!/EchoLoader/.test(p), 'EchoLoader');
     pill(!/running/.test(p), /running/.test(p) ? 'Close Echo VR' : 'Echo closed');
   }

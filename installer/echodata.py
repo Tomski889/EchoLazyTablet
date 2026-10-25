@@ -80,6 +80,13 @@ def sha256(data):
     return hashlib.sha256(data).hexdigest()
 
 
+class MissingPackage(FileNotFoundError):
+    """The manifest points at a package file that isn't in the game folder."""
+    def __init__(self, package):
+        super().__init__(f'package _{package} is missing')
+        self.package = package
+
+
 class Manifest:
     """The manifest, editable. `data` is the folder holding manifests/ and packages/."""
 
@@ -102,6 +109,10 @@ class Manifest:
             raise ValueError('manifest layout not as expected')
         self._cache = {}
 
+    def users_of(self, package):
+        """(type, name) of every resource stored in package `package`."""
+        return [(e[0], e[1]) for e in self.entries if self.frames[e[2] & 0xFFFFFFFF][0] == package]
+
     @classmethod
     def load(cls, data):
         data = Path(data)
@@ -117,6 +128,8 @@ class Manifest:
         if index not in self._cache:
             package, offset, csize, _ = self.frames[index]
             path = (extra_packages or {}).get(package) or self.data / 'packages' / f'{MID}_{package}'
+            if not Path(path).is_file():
+                raise MissingPackage(package)
             with open(path, 'rb') as f:
                 f.seek(offset)
                 block = f.read(csize)

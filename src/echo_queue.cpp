@@ -45,11 +45,14 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <clocale>
+#include <cmath>
 #include <cstdarg>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <map>
+#include <unordered_map>
 #include <mutex>
 #include <condition_variable>
 #include <deque>
@@ -633,6 +636,405 @@ void stopFade(const char* why);
 // work during play). The chains are made with Echo's own command queue (caught in
 // createChainDetour when Echo makes its eye chains): with our own the runtime said -1005
 // (v2.9). Static images first; if refused, ordinary chains committed once.
+bool readFile(const std::wstring& path, std::string& out);
+
+// Live texture switching (texlod) is opt-in, [graphics] live_textures=1: it kept missing views Echo
+// made or copied its own way (24 Oct). By default the GRAPHICS buttons switch the game data's
+// manifest, which takes a restart and is exact (and loads only the small textures).
+bool liveTextures() { return GetPrivateProfileIntW(L"graphics", L"live_textures", 0, iniPath().c_str()) != 0; }
+
+// ---- live texture detail (GRAPHICS LOW / HIGH without a restart) ----
+// Every texture Echo draws with is reached through a shader resource view (SRV). Echo makes
+// them with the default view (all mips) in its CPU-side descriptor slots and copies them into
+// the shader-visible heap for every draw (~30k copies/s; v3.14 probe, 24 Oct). Remade with a
+// ResourceMinLODClamp, the same texture is sampled from its small mips only, from the next frame,
+// with nothing uploaded or rebuilt: that's LOW. HIGH remakes them as Echo made them. Slots
+// are remembered with a reference on their texture, so a slot is never remade for a freed
+// texture; the reference goes when Echo writes something else there (texture streaming
+// rewrites slots all the time) or at shutdown. The device's methods are taken over by swapping
+// their pointers in its vtable (a pointer write, no threads frozen) once Echo's command queue is
+// caught. Only views of 2D textures with mips (plain, array or cube: skies) that start at the top
+// mip are touched: UI and render targets have no mips.
+// Player textures (suits, tints: team colours) stay clearer than the world: the potato tool
+// leaves fingerprints of their mips in EchoLazyTablet.players.bin (FNV-1a of a mip's first row
+// of blocks, with its size), and each texture upload Echo records (CopyTextureRegion from its
+// upload buffer) is checked against them. Echo also copies views into its shader-visible heap
+// and keeps drawing from those copies while an object stays in view (after a switch, what was
+// in view kept its old detail until a turn round, 24 Oct), so a copy of a remembered slot is
+// remembered too, and remade with it. The background effects
+// outside the arena and lobby (the blue band, the red streaks: particle textures nothing else
+// uses) are blanked in LOW the same way, from EchoLazyTablet.hidden.bin: a null view samples as
+// transparent black, which draws nothing for a glowing particle.
+namespace texlod {
+using CreateSrv = void(STDMETHODCALLTYPE*)(ID3D12Device*, ID3D12Resource*, const D3D12_SHADER_RESOURCE_VIEW_DESC*, D3D12_CPU_DESCRIPTOR_HANDLE);
+constexpr unsigned VT_CREATE_SRV = 18;
+CreateSrv createSrvOriginal = nullptr;
+std::atomic<bool> installed{false}, deviceHooked{false}, low{false}, released{false};
+std::atomic<unsigned> targetSize{4};      // LOW: largest mip side sampled ([graphics] live_texture_size)
+std::atomic<unsigned> playerSize{128};    // the same for player textures ([graphics] live_player_size)
+std::mutex mutex;
+ID3D12Device* device = nullptr;
+struct Slot {
+    ID3D12Resource* resource;
+    unsigned mips, layers;
+    U width;
+    unsigned height;
+    DXGI_FORMAT format;
+    bool player, hasView, hidden;
+    D3D12_SHADER_RESOURCE_VIEW_DESC view;   // Echo's own view, when it gave one
+};
+std::unordered_map<SIZE_T, Slot> slots;
+std::set<ID3D12Resource*> players;        // textures an upload showed to be a player's
+std::set<ID3D12Resource*> hiddenTextures; // ... or a background effect's
+std::vector<U> fingerprints, hiddenFingerprints;   // sorted
+U made = 0, clampedMade = 0, playerUploads = 0, hiddenUploads = 0;
+// Why views weren't taken (diagnostics, per 30 s): no resource, Echo's own view LOW can't clamp,
+// not a 2D texture, one mip, drawn into (render target / depth / UAV), multisampled; and
+// remembered slots another copy overwrote.
+U skipNull = 0, skipView = 0, skipDim = 0, skipOneMip = 0, skipDrawn = 0, skipMsaa = 0, overwrittenByCopy = 0;
+int skipShown = 0;
+
+// The view for LOW: the resource's own format and mips, sampling from mip `skip` down.
+// Echo's view (or the default one spelt out), sampling from mip `skip` down.
+bool clampedView(const Slot& s, D3D12_SHADER_RESOURCE_VIEW_DESC& v) {
+    unsigned skip = 0, target = s.player ? playerSize : targetSize;
+    while (skip + 1 < s.mips && std::max<U>(s.width >> skip, s.height >> skip) > target) skip++;
+    if (!skip) return false;
+    if (s.hasView) {
+        v = s.view;
+    } else {
+        v = {};
+        v.Format = s.format;
+        v.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        if (s.layers > 1) {
+            v.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
+            v.Texture2DArray.MipLevels = UINT(-1);
+            v.Texture2DArray.ArraySize = s.layers;
+        } else {
+            v.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+            v.Texture2D.MipLevels = UINT(-1);
+        }
+    }
+    switch (v.ViewDimension) {
+    case D3D12_SRV_DIMENSION_TEXTURE2D: v.Texture2D.ResourceMinLODClamp = float(skip); break;
+    case D3D12_SRV_DIMENSION_TEXTURE2DARRAY: v.Texture2DArray.ResourceMinLODClamp = float(skip); break;
+    case D3D12_SRV_DIMENSION_TEXTURECUBE: v.TextureCube.ResourceMinLODClamp = float(skip); break;
+    case D3D12_SRV_DIMENSION_TEXTURECUBEARRAY: v.TextureCubeArray.ResourceMinLODClamp = float(skip); break;
+    default: return false;
+    }
+    return true;
+}
+
+void write(SIZE_T slot, const Slot& s) {
+    D3D12_SHADER_RESOURCE_VIEW_DESC v;
+    if (low && s.hidden) {   // a null view of the same shape: samples as 0
+        v = {};
+        v.Format = s.hasView ? s.view.Format : s.format;
+        v.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+        v.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        v.Texture2D.MipLevels = 1;
+        createSrvOriginal(device, nullptr, &v, D3D12_CPU_DESCRIPTOR_HANDLE{slot});
+        return;
+    }
+    bool clamp = low && clampedView(s, v);
+    createSrvOriginal(device, s.resource, clamp ? &v : s.hasView ? &s.view : nullptr, D3D12_CPU_DESCRIPTOR_HANDLE{slot});
+    if (clamp) clampedMade++;
+}
+
+using CopySimple = void(STDMETHODCALLTYPE*)(ID3D12Device*, UINT, D3D12_CPU_DESCRIPTOR_HANDLE, D3D12_CPU_DESCRIPTOR_HANDLE, D3D12_DESCRIPTOR_HEAP_TYPE);
+using CopyMany = void(STDMETHODCALLTYPE*)(ID3D12Device*, UINT, const D3D12_CPU_DESCRIPTOR_HANDLE*, const UINT*, UINT,
+                                          const D3D12_CPU_DESCRIPTOR_HANDLE*, const UINT*, D3D12_DESCRIPTOR_HEAP_TYPE);
+using CreateHeap = HRESULT(STDMETHODCALLTYPE*)(ID3D12Device*, const D3D12_DESCRIPTOR_HEAP_DESC*, REFIID, void**);
+constexpr unsigned VT_CREATE_HEAP = 14, VT_COPY_MANY = 23, VT_COPY_SIMPLE = 24;
+CopySimple copySimpleOriginal = nullptr;
+CopyMany copyManyOriginal = nullptr;
+CreateHeap createHeapOriginal = nullptr;
+std::vector<std::pair<SIZE_T, SIZE_T>> cpuHeaps;   // [start, end) of Echo's CPU-only SRV heaps
+std::vector<std::pair<SIZE_T, SIZE_T>> allHeaps;   // and of all its SRV heaps seen made: kept alive (one
+                                                   // reference each). Slots in heaps made before the hook are
+                                                   // written too: Echo keeps those heaps for the whole run.
+UINT increment = 0;
+U aliased = 0;
+
+
+// One descriptor copied from `src` to `dst` (lock held): `dst` now shows what `src` shows.
+void copied(SIZE_T dst, SIZE_T src) {
+    auto old = slots.find(dst);
+    if (old != slots.end()) {
+        if (old->second.resource) old->second.resource->Release();
+        slots.erase(old);
+        if (!slots.count(src)) overwrittenByCopy++;
+    }
+    auto from = slots.find(src);
+    if (from == slots.end() || released) return;
+    from->second.resource->AddRef();
+    slots[dst] = from->second;
+    aliased++;
+}
+
+void STDMETHODCALLTYPE copySimple(ID3D12Device* self, UINT n, D3D12_CPU_DESCRIPTOR_HANDLE dst, D3D12_CPU_DESCRIPTOR_HANDLE src,
+                                  D3D12_DESCRIPTOR_HEAP_TYPE type) {
+    if (type != D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV || !increment) return copySimpleOriginal(self, n, dst, src, type);
+    std::lock_guard<std::mutex> lock(mutex);
+    copySimpleOriginal(self, n, dst, src, type);
+    for (UINT i = 0; i < n; i++) copied(dst.ptr + SIZE_T(i) * increment, src.ptr + SIZE_T(i) * increment);
+}
+
+void STDMETHODCALLTYPE copyMany(ID3D12Device* self, UINT nd, const D3D12_CPU_DESCRIPTOR_HANDLE* ds, const UINT* dsz, UINT ns,
+                                const D3D12_CPU_DESCRIPTOR_HANDLE* ss, const UINT* ssz, D3D12_DESCRIPTOR_HEAP_TYPE type) {
+    bool mine = type == D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV && increment && nd && ns;
+    if (!mine) return copyManyOriginal(self, nd, ds, dsz, ns, ss, ssz, type);
+    std::lock_guard<std::mutex> lock(mutex);
+    copyManyOriginal(self, nd, ds, dsz, ns, ss, ssz, type);
+    // Walk both range lists in step, a descriptor at a time (sizes default to 1).
+    UINT di = 0, si = 0, dk = 0, sk = 0;
+    while (di < nd && si < ns) {
+        copied(ds[di].ptr + SIZE_T(dk) * increment, ss[si].ptr + SIZE_T(sk) * increment);
+        if (++dk >= (dsz ? dsz[di] : 1)) dk = 0, di++;
+        if (++sk >= (ssz ? ssz[si] : 1)) sk = 0, si++;
+    }
+}
+
+HRESULT STDMETHODCALLTYPE createHeap(ID3D12Device* self, const D3D12_DESCRIPTOR_HEAP_DESC* desc, REFIID iid, void** heap) {
+    HRESULT r = createHeapOriginal(self, desc, iid, heap);
+    if (r >= 0 && heap && *heap && desc && desc->Type == D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV && iid == __uuidof(ID3D12DescriptorHeap)) {
+        auto h = static_cast<ID3D12DescriptorHeap*>(*heap);
+        h->AddRef();
+        SIZE_T start = h->GetCPUDescriptorHandleForHeapStart().ptr;
+        std::lock_guard<std::mutex> lock(mutex);
+        if (!increment) increment = self->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+        SIZE_T end = start + SIZE_T(desc->NumDescriptors) * increment;
+        allHeaps.emplace_back(start, end);
+        if (!(desc->Flags & D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE)) cpuHeaps.emplace_back(start, end);
+    }
+    return r;
+}
+
+template <class T> bool swapMethod(void** vt, unsigned index, void* detour, T& original) {
+    DWORD old;
+    if (!VirtualProtect(&vt[index], sizeof(void*), PAGE_EXECUTE_READWRITE, &old)) return false;
+    original = reinterpret_cast<T>(vt[index]);
+    vt[index] = detour;
+    VirtualProtect(&vt[index], sizeof(void*), old, &old);
+    return true;
+}
+
+// Views LOW can clamp: Echo's default view, or its own 2D / array / cube view of all the mips.
+bool clampable(const D3D12_SHADER_RESOURCE_VIEW_DESC* d) {
+    if (!d) return true;
+    switch (d->ViewDimension) {
+    case D3D12_SRV_DIMENSION_TEXTURE2D: return !d->Texture2D.MostDetailedMip && d->Texture2D.ResourceMinLODClamp == 0;
+    case D3D12_SRV_DIMENSION_TEXTURE2DARRAY: return !d->Texture2DArray.MostDetailedMip && d->Texture2DArray.ResourceMinLODClamp == 0;
+    case D3D12_SRV_DIMENSION_TEXTURECUBE: return !d->TextureCube.MostDetailedMip && d->TextureCube.ResourceMinLODClamp == 0;
+    case D3D12_SRV_DIMENSION_TEXTURECUBEARRAY: return !d->TextureCubeArray.MostDetailedMip && d->TextureCubeArray.ResourceMinLODClamp == 0;
+    default: return false;
+    }
+}
+
+void STDMETHODCALLTYPE createSrv(ID3D12Device* self, ID3D12Resource* resource, const D3D12_SHADER_RESOURCE_VIEW_DESC* desc,
+                                 D3D12_CPU_DESCRIPTOR_HANDLE dest) {
+    std::lock_guard<std::mutex> lock(mutex);    // also orders Echo's writes against a switch
+    auto it = slots.find(dest.ptr);
+    if (it != slots.end()) {
+        if (it->second.resource) it->second.resource->Release();
+        slots.erase(it);
+    }
+    if (!resource) skipNull++;
+    if (resource && !released) {
+        D3D12_RESOURCE_DESC r = resource->GetDesc();
+        constexpr auto DRAWN = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET | D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL | D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+        const char* why = r.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D ? (skipDim++, nullptr)
+                        : r.MipLevels <= 1 ? (skipOneMip++, nullptr)
+                        : r.SampleDesc.Count != 1 ? (skipMsaa++, nullptr)
+                        : (r.Flags & DRAWN) ? (skipDrawn++, "drawn into")
+                        : !clampable(desc) ? (skipView++, "Echo's own view") : "";
+        if (why && *why && skipShown < 40) {
+            skipShown++;
+            logf("texlod: skipped (%s): %llux%u mips %u fmt %u flags %x layers %u; view dim %d mip %u..%d clamp %.2f", why, U(r.Width), r.Height,
+                 r.MipLevels, unsigned(r.Format), unsigned(r.Flags), r.DepthOrArraySize, desc ? int(desc->ViewDimension) : -1,
+                 desc ? desc->Texture2D.MostDetailedMip : 0, desc ? int(desc->Texture2D.MipLevels) : -1, desc ? desc->Texture2D.ResourceMinLODClamp : 0.f);
+        }
+        if (why && !*why) {  // images, not what Echo draws into
+            resource->AddRef();
+            Slot s{resource, r.MipLevels, r.DepthOrArraySize, r.Width, r.Height, r.Format, players.count(resource) > 0, desc != nullptr,
+                   hiddenTextures.count(resource) > 0, {}};
+            if (desc) s.view = *desc;
+            slots[dest.ptr] = s;
+            made++;
+            device = self;
+            write(dest.ptr, s);
+            return;
+        }
+    }
+    createSrvOriginal(self, resource, desc, dest);
+}
+
+bool isBc(DXGI_FORMAT f, unsigned& block) {
+    if ((f >= 70 && f <= 72) || (f >= 79 && f <= 81)) { block = 8; return true; }    // BC1, BC4
+    if ((f >= 73 && f <= 78) || (f >= 82 && f <= 84) || (f >= 94 && f <= 99)) { block = 16; return true; }
+    return false;
+}
+
+using CopyTexture = void(STDMETHODCALLTYPE*)(ID3D12GraphicsCommandList*, const D3D12_TEXTURE_COPY_LOCATION*, UINT, UINT, UINT,
+                                             const D3D12_TEXTURE_COPY_LOCATION*, const D3D12_BOX*);
+constexpr unsigned VT_COPY_TEXTURE = 16;
+std::vector<std::pair<void**, CopyTexture>> copyOriginals;   // per command-list vtable
+
+// Echo's loader threads: a texture upload. Its source (an upload buffer, CPU-visible) is read
+// while the copy is recorded; Echo has filled it by then.
+void STDMETHODCALLTYPE copyTexture(ID3D12GraphicsCommandList* list, const D3D12_TEXTURE_COPY_LOCATION* dst, UINT x, UINT y, UINT z,
+                                   const D3D12_TEXTURE_COPY_LOCATION* src, const D3D12_BOX* box) {
+    unsigned block = 0;
+    if (dst && src && dst->pResource && src->pResource && (!fingerprints.empty() || !hiddenFingerprints.empty()) &&
+        dst->Type == D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX &&
+        src->Type == D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT && !box) {
+        auto& f = src->PlacedFootprint.Footprint;
+        if (f.Width >= 32 && f.Height >= 32 && isBc(f.Format, block)) {
+            void* data = nullptr;
+            D3D12_RANGE none{0, 0};
+            if (src->pResource->Map(0, nullptr, &data) >= 0 && data) {
+                const unsigned char* p = static_cast<const unsigned char*>(data) + src->PlacedFootprint.Offset;
+                unsigned n = std::min(64u, (f.Width + 3) / 4 * block);
+                U v = 0xcbf29ce484222325ull;
+                bool seen[256] = {};
+                unsigned distinct = 0;
+                for (unsigned i = 0; i < n; i++) {
+                    v = (v ^ p[i]) * 0x100000001b3ull;
+                    if (!seen[p[i]]) seen[p[i]] = true, distinct++;
+                }
+                v ^= U(f.Width) << 40 ^ U(f.Height) << 20;
+                src->pResource->Unmap(0, &none);
+                if (distinct > 4 && std::binary_search(fingerprints.begin(), fingerprints.end(), v)) {
+                    std::lock_guard<std::mutex> lock(mutex);
+                    if (players.insert(dst->pResource).second) {
+                        playerUploads++;
+                        for (auto& [slot, s] : slots)
+                            if (s.resource == dst->pResource && !s.player) { s.player = true; write(slot, s); }
+                    }
+                } else if (distinct > 4 && std::binary_search(hiddenFingerprints.begin(), hiddenFingerprints.end(), v)) {
+                    std::lock_guard<std::mutex> lock(mutex);
+                    if (hiddenTextures.insert(dst->pResource).second) {
+                        hiddenUploads++;
+                        for (auto& [slot, s] : slots)
+                            if (s.resource == dst->pResource && !s.hidden) { s.hidden = true; write(slot, s); }
+                    }
+                }
+            }
+        }
+    }
+    void** vt = *reinterpret_cast<void***>(list);
+    for (auto& [table, original] : copyOriginals)
+        if (table == vt) return original(list, dst, x, y, z, src, box);
+    copyOriginals.front().second(list, dst, x, y, z, src, box);   // (not reached: every table patched is listed)
+}
+
+// Every command list of a kind shares one method table: a list of our own shows where it is.
+void hookCopies(ID3D12Device* d) {
+    for (auto type : {D3D12_COMMAND_LIST_TYPE_DIRECT, D3D12_COMMAND_LIST_TYPE_COPY}) {
+        ID3D12CommandAllocator* allocator = nullptr;
+        ID3D12GraphicsCommandList* list = nullptr;
+        if (d->CreateCommandAllocator(type, __uuidof(ID3D12CommandAllocator), reinterpret_cast<void**>(&allocator)) >= 0 &&
+            d->CreateCommandList(0, type, allocator, nullptr, __uuidof(ID3D12GraphicsCommandList), reinterpret_cast<void**>(&list)) >= 0) {
+            void** vt = *reinterpret_cast<void***>(list);
+            bool known = false;
+            for (auto& [table, original] : copyOriginals) known |= table == vt;
+            DWORD old;
+            if (!known && VirtualProtect(&vt[VT_COPY_TEXTURE], sizeof(void*), PAGE_EXECUTE_READWRITE, &old)) {
+                copyOriginals.emplace_back(vt, reinterpret_cast<CopyTexture>(vt[VT_COPY_TEXTURE]));
+                vt[VT_COPY_TEXTURE] = reinterpret_cast<void*>(copyTexture);
+                VirtualProtect(&vt[VT_COPY_TEXTURE], sizeof(void*), old, &old);
+            }
+            list->Close();
+        }
+        if (list) list->Release();
+        if (allocator) allocator->Release();
+    }
+}
+
+void loadFingerprints(const wchar_t* file, std::vector<U>& out) {
+    std::string data;
+    if (!readFile(dir + L"\\" + file, data)) { logf("texlod: no %ls", file); return; }
+    out.resize(data.size() / 8);
+    memcpy(out.data(), data.data(), out.size() * 8);
+    std::sort(out.begin(), out.end());
+}
+
+// Any thread. Remakes every remembered view for the new detail; from the next frame on.
+void setLow(bool on) {
+    std::lock_guard<std::mutex> lock(mutex);
+    low = on;
+    if (!deviceHooked || !device) return;
+    for (auto& [slot, s] : slots) write(slot, s);
+    logf("texlod: %s: %zu texture views remade", on ? "LOW" : "HIGH", slots.size());
+}
+
+// ovr_Destroy (shutdown): the references go, so Echo's textures can be freed.
+void release() {
+    std::lock_guard<std::mutex> lock(mutex);
+    released = true;
+    for (auto& [slot, s] : slots) if (s.resource) s.resource->Release();
+    slots.clear();
+}
+
+// The device's methods: one vtable for every D3D12 device of the runtime.
+bool hookDevice(ID3D12Device* d) {
+    if (deviceHooked) return true;
+    void** vt = *reinterpret_cast<void***>(d);
+    if (!swapMethod(vt, VT_CREATE_SRV, reinterpret_cast<void*>(createSrv), createSrvOriginal)) {
+        logf("texlod: couldn't take over the device's CreateShaderResourceView");
+        return false;
+    }
+    if (!swapMethod(vt, VT_CREATE_HEAP, reinterpret_cast<void*>(createHeap), createHeapOriginal) ||
+        !swapMethod(vt, VT_COPY_SIMPLE, reinterpret_cast<void*>(copySimple), copySimpleOriginal) ||
+        !swapMethod(vt, VT_COPY_MANY, reinterpret_cast<void*>(copyMany), copyManyOriginal))
+        logf("texlod: couldn't watch Echo's descriptor copies");
+    deviceHooked = true;
+    return true;
+}
+
+void loadAll() {
+    targetSize = std::clamp<unsigned>(GetPrivateProfileIntW(L"graphics", L"live_texture_size", 4, iniPath().c_str()), 1, 4096);
+    playerSize = std::clamp<unsigned>(GetPrivateProfileIntW(L"graphics", L"live_player_size", 128, iniPath().c_str()), 1, 4096);
+    loadFingerprints(L"EchoLazyTablet.players.bin", fingerprints);
+    loadFingerprints(L"EchoLazyTablet.hidden.bin", hiddenFingerprints);
+}
+
+// From createChainDetour, once Echo's command queue is known: its uploads (player textures).
+void install(ID3D12CommandQueue* queue) {
+    if (installed || !liveTextures()) return;
+    ID3D12Device* d = nullptr;
+    if (queue->GetDevice(__uuidof(ID3D12Device), reinterpret_cast<void**>(&d)) < 0 || !d) { logf("texlod: no device"); return; }
+    if (hookDevice(d)) {
+        if (!fingerprints.empty() || !hiddenFingerprints.empty()) hookCopies(d);
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            if (!increment) increment = d->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+        }
+        installed = true;
+        std::lock_guard<std::mutex> lock(mutex);
+        logf("texlod: watching Echo's texture views (LOW: world up to %u px, players %u px; %zu player fingerprints, %zu upload table(s); "
+             "%zu SRV heaps seen, %zu views remembered so far)", unsigned(targetSize), unsigned(playerSize), fingerprints.size(),
+             copyOriginals.size(), allHeaps.size(), slots.size());
+    }
+    d->Release();   // Echo holds its own
+}
+
+// Every 30 s with the perf line.
+void report() {
+    if (!deviceHooked) return;
+    std::lock_guard<std::mutex> lock(mutex);
+    if (made || clampedMade || playerUploads || hiddenUploads || aliased)
+        logf("texlod: %llu views made (%llu at LOW detail), %llu copied, %llu player / %llu background textures found in 30 s; "
+             "%zu remembered, %zu players, %zu background, %zu CPU heaps",
+             made, clampedMade, aliased, playerUploads, hiddenUploads, slots.size(), players.size(), hiddenTextures.size(), cpuHeaps.size());
+    if (skipNull || skipView || skipDim || skipOneMip || skipDrawn || skipMsaa || overwrittenByCopy)
+        logf("texlod: not taken in 30 s: %llu without a texture, %llu own views, %llu not 2D, %llu one mip, %llu drawn into, %llu multisampled; "
+             "%llu remembered slots overwritten by a copy", skipNull, skipView, skipDim, skipOneMip, skipDrawn, skipMsaa, overwrittenByCopy);
+    made = clampedMade = playerUploads = hiddenUploads = aliased = 0;
+    skipNull = skipView = skipDim = skipOneMip = skipDrawn = skipMsaa = overwrittenByCopy = 0;
+}
+}  // namespace texlod
+
 namespace quad {
 using GetBuffer = int (*)(void*, void*, int, IID, void**);
 using Create = int (*)(void*, IUnknown*, const void*, void**);
@@ -768,6 +1170,7 @@ int createChainDetour(void* session, IUnknown* d3d, const void* desc, void** cha
         if (d3d->QueryInterface(__uuidof(ID3D12CommandQueue), reinterpret_cast<void**>(&queue)) >= 0 && queue) {
             echoQueue = queue;  // reference kept
             logf("fade: caught Echo's command queue");
+            texlod::install(queue);
         }
     }
     return createOriginal(session, d3d, desc, chain);
@@ -778,6 +1181,7 @@ int createChainDetour(void* session, IUnknown* d3d, const void* desc, void** cha
 using Destroy = void (*)(void*);
 Destroy destroyOriginal = nullptr;
 void destroyDetour(void* session) {
+    texlod::release();
     if (ready) {
         using DestroyChain = void (*)(void*, void*);
         auto destroyChain = reinterpret_cast<DestroyChain>(GetProcAddress(GetModuleHandleW(L"LibOVRRT64_1.dll"), "ovr_DestroyTextureSwapChain"));
@@ -1304,7 +1708,7 @@ DWORD WINAPI playersWatch(LPVOID) {
 // sends the account's ID and display name from the saved profile (xplatformid, displayname)
 // and gets back blocked or not. The answer is kept in EchoLazyTablet.ini ([access] blocked) for
 // when the service can't be reached; with no answer ever, EchoLazyTablet stays on.
-constexpr const char* ECHOQUEUE_VERSION = "3.13";
+constexpr const char* ECHOQUEUE_VERSION = "3.14";
 constexpr const wchar_t* ACCESS_HOST = L"echoqueue.dokuyegar.workers.dev";  // the deployed Worker (server/worker.js)
 constexpr U ACCESS_EVERY_MS = 15 * 60 * 1000;
 
@@ -1532,8 +1936,14 @@ struct Context {
     std::array<View, KINDS> views{};
     std::set<unsigned> masked;
     U gateKey = ~0ull;          // button masks last applied for (page, searching, ready, buttons)
-    std::string status, timer, timerCaption, statCaption, matches;  // what the page's dynamic text shows
+    std::string status, timer, timerCaption, statCaption, matches, gfxCaption;  // what the page's dynamic text shows
     int searchShown = -1;       // the searching layout (teal card, timer, CANCEL SEARCH) shown
+    int gfxShown = -2;          // the graphics choice lit (GFX_*)
+    bool setup = false;         // the CLIP HOTKEY page is up instead of the PLAY page
+    bool ctrl = false, shift = false, alt = false;   // its modifiers, and its key ("" none yet)
+    std::string key, titleText, subtitleText;
+    U pickFirstUntil = 0;       // SAVE with no key: says so for a moment
+    int modsShown = -1;
     int applied = -1;           // page visibility last applied (1 PLAY, 0 stock)
     U polledAt = 0;
     int state = -1;             // lobby state, polled a few times a second
@@ -1554,8 +1964,15 @@ thread_local bool sendingKick = false;
 bool isContent(U n) { return std::find(std::begin(CONTENT), std::end(CONTENT), n) != std::end(CONTENT); }
 bool isStockTab(U n) { return n >= STOCK_TAB_FIRST && n <= STOCK_TAB_LAST; }
 bool isOtherTab(U n) { return std::find(layout.otherTabs.begin(), layout.otherTabs.end(), n) != layout.otherTabs.end(); }
+const QueueKey* keyFor(U n) {
+    for (auto& k : QUEUE_KEYS)
+        if (k.name == n) return &k;
+    return nullptr;
+}
 bool isOurs(U n) {
-    return n == QUEUE_TAB || n == QUEUE_START || n == QUEUE_CANCEL || n == QUEUE_LOBBY || n == QUEUE_PRIVATE || n == QUEUE_STATS;
+    if (keyFor(n) || n == QUEUE_CLIP_KEY) return true;
+    return n == QUEUE_TAB || n == QUEUE_START || n == QUEUE_CANCEL || n == QUEUE_LOBBY || n == QUEUE_PRIVATE || n == QUEUE_STATS ||
+           n == QUEUE_GFX_HIGH || n == QUEUE_GFX_LOW || n == QUEUE_CLIP;
 }
 
 void failTablet(const char* why) { tabletFault = true; logf("TABLET FAULT: %s -- PLAY tab off for this session", why); }
@@ -1577,6 +1994,345 @@ void remember(void* p, unsigned depth = 0) {
         remember(at<void*>(p, 0x378), depth + 1);
         return;
     }
+}
+
+// ---- graphics HIGH / LOW ----
+// EchoPotato (potato.py apply) leaves two manifests next to the game's own, <manifest>.potato-high
+// and .potato-low, and the graphics settings for each in EchoLazyTablet.graphics.ini ([high] and
+// [low], key=JSON value). Which manifest is live says which graphics are on. Echo reads both
+// files at startup and writes its settings file back from memory when it closes, so a switch
+// takes a restart, and the live mode's settings are put back in each time the plugin starts.
+enum { GFX_UNKNOWN = -1, GFX_HIGH = 0, GFX_LOW = 1 };
+std::atomic<int> gfxLoaded{GFX_UNKNOWN}, gfxChosen{GFX_UNKNOWN};
+std::atomic<bool> gfxBusy{false};
+std::string gfxMessage;     // the last switch's result (under tabletMutex)
+U gfxMessageAt = 0;
+
+std::wstring manifestPath() {
+    std::wstring root = dir;
+    for (int i = 0; i < 3; i++) root.resize(root.find_last_of(L"\\/"));  // plugins -> win10 -> bin -> game
+    return root + L"\\_data\\5932408047\\rad15\\win10\\manifests\\48037dc70b0ecab2";
+}
+
+std::wstring settingsPath() {
+    wchar_t local[MAX_PATH];
+    DWORD n = GetEnvironmentVariableW(L"LOCALAPPDATA", local, MAX_PATH);
+    return n && n < MAX_PATH ? std::wstring(local) + L"\\rad\\loneecho\\settings_mp_v2.json" : std::wstring();
+}
+
+bool readFile(const std::wstring& path, std::string& out) {
+    FILE* f = _wfopen(path.c_str(), L"rb");
+    if (!f) return false;
+    out.clear();
+    char buffer[65536];
+    for (size_t n; (n = fread(buffer, 1, sizeof buffer, f)) > 0;) out.append(buffer, n);
+    bool ok = !ferror(f);
+    fclose(f);
+    return ok;
+}
+
+bool writeFile(const std::wstring& path, const std::string& data) {
+    std::wstring tmp = path + L".elt-tmp";
+    FILE* f = _wfopen(tmp.c_str(), L"wb");
+    if (!f) return false;
+    bool ok = fwrite(data.data(), 1, data.size(), f) == data.size();
+    ok = fclose(f) == 0 && ok;
+    if (ok && MoveFileExW(tmp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) return true;
+    DWORD error = GetLastError();
+    DeleteFileW(tmp.c_str());
+    SetLastError(error);
+    return false;
+}
+
+int liveGraphics() {
+    std::string live, high, low;
+    std::wstring m = manifestPath();
+    if (!readFile(m, live) || !readFile(m + L".potato-high", high) || !readFile(m + L".potato-low", low)) return GFX_UNKNOWN;
+    return live == low ? GFX_LOW : live == high ? GFX_HIGH : GFX_UNKNOWN;
+}
+
+// Sets keys inside the "graphics" object of Echo's settings JSON (its "quality" object
+// included) to the given JSON values. -> how many changed, or -1 if there's no such object.
+int setGraphicsValues(std::string& json, const std::vector<std::pair<std::string, std::string>>& values) {
+    size_t key = json.find("\"graphics\"");
+    if (key == std::string::npos) return -1;
+    size_t open = json.find_first_not_of(" \t\r\n", key + 10);
+    if (open == std::string::npos || json[open] != ':') return -1;
+    open = json.find_first_not_of(" \t\r\n", open + 1);
+    if (open == std::string::npos || json[open] != '{') return -1;
+    size_t end = open;
+    for (int depth = 0; end < json.size(); end++) {
+        if (json[end] == '{') depth++;
+        else if (json[end] == '}' && --depth == 0) break;
+    }
+    if (end >= json.size()) return -1;
+    int changed = 0;
+    for (auto& [k, v] : values) {
+        std::string quoted = "\"" + k + "\"";
+        size_t at = json.find(quoted, open);
+        if (at == std::string::npos || at > end) continue;
+        size_t colon = json.find_first_not_of(" \t\r\n", at + quoted.size());
+        if (colon == std::string::npos || json[colon] != ':') continue;
+        size_t v0 = json.find_first_not_of(" \t\r\n", colon + 1), v1 = json.find_first_of(",}\r\n", v0);
+        if (v0 == std::string::npos || v1 == std::string::npos || v1 > end) continue;
+        while (v1 > v0 && (json[v1 - 1] == ' ' || json[v1 - 1] == '\t')) v1--;
+        if (json.compare(v0, v1 - v0, v) == 0) continue;
+        end = end + v.size() - (v1 - v0);
+        json.replace(v0, v1 - v0, v);
+        changed++;
+    }
+    return changed;
+}
+
+bool applyGraphicsSettings(int mode) {
+    wchar_t section[8192];
+    std::wstring ini = dir + L"\\EchoLazyTablet.graphics.ini";
+    DWORD n = GetPrivateProfileSectionW(mode == GFX_LOW ? L"low" : L"high", section, 8192, ini.c_str());
+    std::vector<std::pair<std::string, std::string>> values;
+    for (const wchar_t* line = section; line < section + n && *line; line += wcslen(line) + 1) {
+        std::string s;
+        for (const wchar_t* c = line; *c; c++) s += char(*c);   // ASCII keys and values
+        size_t eq = s.find('=');
+        if (eq != std::string::npos) values.emplace_back(s.substr(0, eq), s.substr(eq + 1));
+    }
+    std::string json;
+    std::wstring path = settingsPath();
+    if (values.empty() || path.empty() || !readFile(path, json)) { logf("graphics: no settings to apply (%s)", values.empty() ? "EchoLazyTablet.graphics.ini" : "settings_mp_v2.json"); return false; }
+    int changed = setGraphicsValues(json, values);
+    if (changed < 0) { logf("graphics: settings_mp_v2.json has no graphics section"); return false; }
+    if (changed && !writeFile(path, json)) { logf("graphics: couldn't write settings_mp_v2.json (error %lu)", GetLastError()); return false; }
+    if (changed) logf("graphics: %d %s setting(s) written", changed, mode == GFX_LOW ? "LOW" : "HIGH");
+    return true;
+}
+
+// The mode (EchoLazyTablet.ini [graphics] mode=low/high) is what the buttons last chose. LOW
+// is the textures' small mips (texlod, live) plus Echo's lowest settings (shadows etc., read at
+// startup). The potato manifest (tiny textures in the game data) is only left in place if it's
+// live already: with full textures loaded, both directions switch without a restart.
+int savedMode() {
+    wchar_t mode[16];
+    GetPrivateProfileStringW(L"graphics", L"mode", L"", mode, 16, iniPath().c_str());
+    if (!wcscmp(mode, L"low")) return GFX_LOW;
+    if (!wcscmp(mode, L"high")) return GFX_HIGH;
+    return liveGraphics() == GFX_LOW ? GFX_LOW : GFX_HIGH;   // before 3.14's live switch: the manifest said
+}
+
+// At startup, before Echo reads its settings and makes its textures.
+void graphicsStartup() {
+    gfxLoaded = liveGraphics();       // GFX_LOW: the potato textures are what's loaded this run
+    int mode = liveTextures() || gfxLoaded == GFX_UNKNOWN ? savedMode() : gfxLoaded.load();
+    gfxChosen = mode;
+    texlod::low = liveTextures() && mode == GFX_LOW;
+    logf("graphics: %s%s%s", mode == GFX_LOW ? "LOW" : "HIGH", gfxLoaded == GFX_LOW ? " (potato textures in the game data)" : "",
+         liveTextures() ? ", textures switch live" : "");
+    applyGraphicsSettings(mode);
+}
+
+// Shadows and effects (the settings file) follow at the next start either way: switching those
+// live crashed (see below).
+std::string switchGraphics(int mode) {
+    const char* name = mode == GFX_LOW ? "LOW" : "HIGH";
+    WritePrivateProfileStringW(L"graphics", L"mode", mode == GFX_LOW ? L"low" : L"high", iniPath().c_str());
+    applyGraphicsSettings(mode);
+    if (texlod::deviceHooked) {   // live textures (opt-in): the full textures stay in the game data
+        texlod::setLow(mode == GFX_LOW);
+        gfxChosen = mode;
+        logf("graphics: %s chosen (live)", name);
+        return std::string(name) + " GRAPHICS ON";
+    }
+    int live = liveGraphics();
+    if (live == GFX_UNKNOWN) {
+        logf("graphics: can't switch: the potato manifests are missing or the game data changed since");
+        return "RUN APPLY POTATO TEXTURES AGAIN FIRST";
+    }
+    if (live != mode) {
+        std::string data;
+        std::wstring m = manifestPath();
+        if (!readFile(m + (mode == GFX_LOW ? L".potato-low" : L".potato-high"), data) || !writeFile(m, data)) {
+            logf("graphics: couldn't switch the manifest to %s (error %lu)", name, GetLastError());
+            return "COULDN'T SWITCH - SEE ECHOLAZYTABLET.LOG";
+        }
+    }
+    gfxChosen = mode;
+    logf("graphics: %s chosen", name);
+    return mode == gfxLoaded ? std::string(name) + " GRAPHICS - ALREADY ON" : std::string(name) + " GRAPHICS - RESTART ECHO";
+}
+
+// Live switching. Echo applies its graphics settings (game+0x8dd0, the "graphics" object of
+// settings_mp_v2.json) with 0xc31870(settings, game, reloadTextures): at startup (0x109209),
+// and again when settings change ("### Applying new graphics settings ###"). The "quality"
+// object is at settings+0x28 in the order the JSON reader (0xc2e412..) fills it; settings+0x24
+// is the preset ("qualitylevel", 0 = custom). Only the quality values switch live: textures come
+// from the game data Echo reads once at startup, so those still take a restart.
+constexpr unsigned RVA_APPLY_GRAPHICS = 0xc31870, GAME_GRAPHICS = 0x8dd0, GRAPHICS_PRESET = 0x24, GRAPHICS_QUALITY = 0x28;
+constexpr unsigned char APPLY_GRAPHICS_PROLOGUE[] = {0x48, 0x89, 0x5c, 0x24, 0x10, 0x48, 0x89, 0x74, 0x24, 0x18,
+                                                     0x48, 0x89, 0x7c, 0x24, 0x20, 0x55, 0x41, 0x56, 0x41, 0x57};
+using ApplyGraphics = void (*)(void* settings, void* game, int reloadTextures);
+struct QualityField { const char* key; unsigned offset; bool isFloat; };
+const QualityField QUALITY_FIELDS[] = {{"shadowresolution", 0x00, false}, {"cascaderesolution", 0x04, false},
+                                       {"cascadedistance", 0x08, true}, {"shadowmsaa", 0x0c, false}, {"lights", 0x18, false},
+                                       {"shadows", 0x1c, false}, {"meshes", 0x24, false}, {"fx", 0x2c, false}};
+constexpr size_t QUALITY_COUNT = sizeof QUALITY_FIELDS / sizeof QUALITY_FIELDS[0];
+using QualityValues = std::array<double, QUALITY_COUNT>;
+std::atomic<int> gfxLiveWanted{GFX_UNKNOWN};    // set by the switch thread, done on the game thread
+std::atomic<bool> gfxLiveOff{false};            // the check below failed once: restart-only from then on
+
+bool qualityValues(int mode, QualityValues& out) {
+    std::wstring ini = dir + L"\\EchoLazyTablet.graphics.ini";
+    for (size_t i = 0; i < QUALITY_COUNT; i++) {
+        wchar_t key[32], value[32];
+        swprintf(key, 32, L"%hs", QUALITY_FIELDS[i].key);
+        GetPrivateProfileStringW(mode == GFX_LOW ? L"low" : L"high", key, L"", value, 32, ini.c_str());
+        if (!value[0]) return false;
+        static _locale_t c = _create_locale(LC_NUMERIC, "C");   // the ini is JSON numbers, whatever Echo's locale
+        out[i] = _wcstod_l(value, nullptr, c);
+    }
+    return true;
+}
+
+bool qualityMatches(void* q, const QualityValues& v) {
+    for (size_t i = 0; i < QUALITY_COUNT; i++) {
+        auto& f = QUALITY_FIELDS[i];
+        double now = f.isFloat ? at<float>(q, f.offset) : double(at<unsigned>(q, f.offset));
+        if (std::abs(now - v[i]) > 1e-3) return false;
+    }
+    return true;
+}
+
+// On the game thread. Only writes when Echo's settings in memory hold exactly the values of one
+// of the two modes (so the layout above is confirmed on this PC), with the custom preset.
+bool applyGraphicsLive(int mode) {
+    QualityValues want, other;
+    void* game = exe ? *reinterpret_cast<void**>(exe + RVA_GAME) : nullptr;
+    void* settings = game ? static_cast<P>(game) + GAME_GRAPHICS : nullptr;
+    if (!settings || !readable(settings, GRAPHICS_QUALITY + 0x30)) { logf("graphics: live switch: no game object yet"); return false; }
+    if (memcmp(exe + RVA_APPLY_GRAPHICS, APPLY_GRAPHICS_PROLOGUE, sizeof APPLY_GRAPHICS_PROLOGUE) != 0) {
+        logf("graphics: live switch off: Echo's apply-settings code isn't where expected");
+        gfxLiveOff = true;
+        return false;
+    }
+    if (!qualityValues(mode, want) || !qualityValues(mode == GFX_LOW ? GFX_HIGH : GFX_LOW, other)) return false;
+    void* q = static_cast<P>(settings) + GRAPHICS_QUALITY;
+    if (at<unsigned>(settings, GRAPHICS_PRESET) != 0 || (!qualityMatches(q, want) && !qualityMatches(q, other))) {
+        char dump[256] = "";
+        for (size_t i = 0; i < QUALITY_COUNT; i++) {
+            auto& f = QUALITY_FIELDS[i];
+            snprintf(dump + strlen(dump), sizeof dump - strlen(dump), " %s=%g", f.key,
+                     f.isFloat ? at<float>(q, f.offset) : double(at<unsigned>(q, f.offset)));
+        }
+        logf("graphics: live switch off: Echo's settings in memory aren't as expected (preset %u;%s)",
+             at<unsigned>(settings, GRAPHICS_PRESET), dump);
+        gfxLiveOff = true;
+        return false;
+    }
+    for (size_t i = 0; i < QUALITY_COUNT; i++) {
+        auto& f = QUALITY_FIELDS[i];
+        if (f.isFloat) at<float>(q, f.offset) = float(want[i]);
+        else at<unsigned>(q, f.offset) = unsigned(want[i]);
+    }
+    fn<ApplyGraphics>(exe, RVA_APPLY_GRAPHICS)(settings, game, 0);
+    logf("graphics: %s applied live (shadows, lights, meshes, effects)", mode == GFX_LOW ? "LOW" : "HIGH");
+    return true;
+}
+
+DWORD WINAPI graphicsSwitch(LPVOID mode) {
+    std::string message = switchGraphics(int(reinterpret_cast<intptr_t>(mode)));
+    // Live switching is off unless [graphics] live=1: applying settings mid-game makes Echo
+    // rebuild its VR swap chains and pipelines, and a second switch 4 s after the first took the
+    // GPU device down (24 Oct, "Timed out waiting for GPU to finish").
+    bool liveAllowed = GetPrivateProfileIntW(L"graphics", L"live", 0, iniPath().c_str()) != 0;
+    if (liveAllowed && gfxChosen == int(reinterpret_cast<intptr_t>(mode)) && !gfxLiveOff) {
+        gfxLiveWanted = int(reinterpret_cast<intptr_t>(mode));   // the result message comes from the game thread
+    } else {
+        std::lock_guard<std::recursive_mutex> lock(tabletMutex);
+        gfxMessage = message;
+        gfxMessageAt = GetTickCount64();
+        gfxBusy = false;
+    }
+    return 0;
+}
+
+// From the button hook (game thread, our lock held).
+void graphicsLiveTick() {
+    int mode = gfxLiveWanted.exchange(GFX_UNKNOWN);
+    if (mode == GFX_UNKNOWN) return;
+    const char* name = mode == GFX_LOW ? "LOW" : "HIGH";
+    bool live = applyGraphicsLive(mode);
+    bool restart = mode != gfxLoaded;    // the textures loaded at startup are the other ones
+    gfxMessage = std::string(name) + (live ? (restart ? " GRAPHICS ON - TEXTURES AFTER A RESTART" : " GRAPHICS ON")
+                                           : (restart ? " GRAPHICS - RESTART ECHO TO APPLY" : " GRAPHICS - ALREADY ON"));
+    gfxMessageAt = GetTickCount64();
+    gfxBusy = false;
+}
+
+// ---- CLIP ----
+// Presses the player's clip keybind ([clip] keys, e.g. ctrl+t for Medal) as if typed, for clip
+// recorders listening for a global hotkey. Modifiers ctrl/shift/alt/win, then one key: a letter or
+// digit, F1..F24, or a name below.
+struct Keys { std::vector<WORD> vks; std::string text; };
+
+bool parseKeys(const std::string& spec, Keys& out) {
+    static const std::pair<const char*, WORD> NAMED[] = {
+        {"ctrl", VK_CONTROL}, {"control", VK_CONTROL}, {"shift", VK_SHIFT}, {"alt", VK_MENU}, {"win", VK_LWIN},
+        {"space", VK_SPACE}, {"enter", VK_RETURN}, {"tab", VK_TAB}, {"home", VK_HOME}, {"end", VK_END}, {"insert", VK_INSERT},
+        {"delete", VK_DELETE}, {"pageup", VK_PRIOR}, {"pagedown", VK_NEXT}, {"printscreen", VK_SNAPSHOT}, {"pause", VK_PAUSE},
+        {"up", VK_UP}, {"down", VK_DOWN}, {"left", VK_LEFT}, {"right", VK_RIGHT}};
+    out = {};
+    size_t start = 0;
+    while (start <= spec.size()) {
+        size_t plus = spec.find('+', start);
+        std::string part = spec.substr(start, plus == std::string::npos ? std::string::npos : plus - start);
+        part.erase(0, part.find_first_not_of(" \t"));
+        part.erase(part.find_last_not_of(" \t") + 1);
+        for (auto& ch : part) ch = char(tolower(static_cast<unsigned char>(ch)));
+        WORD vk = 0;
+        if (part.size() == 1 && isalnum(static_cast<unsigned char>(part[0]))) vk = WORD(toupper(static_cast<unsigned char>(part[0])));
+        else if (part.size() >= 2 && part[0] == 'f' && isdigit(static_cast<unsigned char>(part[1]))) {
+            int n = atoi(part.c_str() + 1);
+            if (n >= 1 && n <= 24) vk = WORD(VK_F1 + n - 1);
+        } else if (part.rfind("numpad", 0) == 0 && part.size() == 7 && isdigit(static_cast<unsigned char>(part[6]))) {
+            vk = WORD(VK_NUMPAD0 + (part[6] - '0'));
+        } else {
+            for (auto& [name, code] : NAMED)
+                if (part == name) vk = code;
+        }
+        if (!vk) return false;
+        out.vks.push_back(vk);
+        if (!out.text.empty()) out.text += "+";
+        for (auto ch : part) out.text += char(toupper(static_cast<unsigned char>(ch)));
+        if (plus == std::string::npos) break;
+        start = plus + 1;
+    }
+    return !out.vks.empty();
+}
+
+std::string clipKeysSpec() {
+    wchar_t buffer[64];
+    GetPrivateProfileStringW(L"clip", L"keys", L"", buffer, 64, iniPath().c_str());
+    std::string spec;
+    for (const wchar_t* c = buffer; *c; c++) spec += char(*c);
+    return spec;
+}
+
+DWORD WINAPI pressClipKeys(LPVOID) {
+    Keys keys;
+    std::string spec = clipKeysSpec();
+    if (!parseKeys(spec, keys)) { logf("clip: can't read [clip] keys=%s", spec.c_str()); return 0; }
+    std::vector<INPUT> down, up;
+    for (WORD vk : keys.vks) {
+        INPUT in{};
+        in.type = INPUT_KEYBOARD;
+        in.ki.wVk = vk;
+        in.ki.wScan = WORD(MapVirtualKeyW(vk, MAPVK_VK_TO_VSC));
+        down.push_back(in);
+        in.ki.dwFlags = KEYEVENTF_KEYUP;
+        up.insert(up.begin(), in);   // released in reverse order
+    }
+    UINT sent = SendInput(UINT(down.size()), down.data(), sizeof(INPUT));
+    Sleep(60);   // held a moment: some recorders poll the keyboard
+    sent += SendInput(UINT(up.size()), up.data(), sizeof(INPUT));
+    logf("clip: pressed %s (%u of %zu key events sent)", keys.text.c_str(), sent, down.size() * 2);
+    return 0;
 }
 
 std::string elapsed(U ms) {
@@ -1640,8 +2396,31 @@ void render(Context& c) {
     void* overlay = c.views[2].p;
     if (c.views[0].p) ensure(c.views[0].p, layout.rootSlot, true);
     if (overlay && changed)
-        for (unsigned i : {QUEUE_PAGE_PAGE, QUEUE_PAGE_COVER, QUEUE_PAGE_HEADER, QUEUE_PAGE_TITLE, QUEUE_PAGE_SUBTITLE})
+        for (unsigned i : {QUEUE_PAGE_COVER, QUEUE_PAGE_HEADER, QUEUE_PAGE_TITLE, QUEUE_PAGE_SUBTITLE})
             ensure(overlay, i, active);
+    if (overlay) {   // the PLAY page or, in its place, the CLIP HOTKEY page
+        ensure(overlay, QUEUE_PAGE_PAGE, active && !c.setup);
+        ensure(overlay, QUEUE_PAGE_KEYBOARD, active && c.setup);
+    }
+    if (overlay && active) {   // the title strip: PLAY, or CLIP and the hotkey picked so far
+        std::string sub = "ARENA MATCHMAKING";
+        if (c.setup && now < c.pickFirstUntil) sub = "PICK A KEY, THEN SAVE";
+        else if (c.setup && !c.ctrl && !c.shift && !c.alt && c.key.empty()) sub = "PICK YOUR CLIP APP'S HOTKEY";
+        else if (c.setup)
+            sub = "HOTKEY: " + std::string(c.ctrl ? "CTRL + " : "") + (c.shift ? "SHIFT + " : "") + (c.alt ? "ALT + " : "") +
+                  (c.key.empty() ? "..." : c.key);
+        setText(overlay, QUEUE_PAGE_TITLE, c.titleText, c.setup ? "CLIP" : "PLAY");
+        setText(overlay, QUEUE_PAGE_SUBTITLE, c.subtitleText, sub);
+    }
+    if (overlay && active && c.setup) {
+        int mods = c.ctrl | c.shift << 1 | c.alt << 2;
+        if (c.modsShown != mods) {
+            ensure(overlay, QUEUE_PAGE_MOD_CTRL, c.ctrl);
+            ensure(overlay, QUEUE_PAGE_MOD_SHIFT, c.shift);
+            ensure(overlay, QUEUE_PAGE_MOD_ALT, c.alt);
+            c.modsShown = mods;
+        }
+    }
     // Tab highlight: ours while our page is up, otherwise the stock ones (which the game's
     // own scripts keep pointing at the right stock tab). While ours is up, the game may
     // re-show its highlight; re-checked a few times a second, not every frame.
@@ -1669,6 +2448,7 @@ void render(Context& c) {
                     : r == Queued::NotReady ? "NOT READY YET - TRY AGAIN IN A MOMENT" : "COULDN'T QUEUE - SEE ECHOLAZYTABLET.LOG";
             c.flashUntil = lastResultAt + 3000;
         }
+        if (gfxMessageAt && now - gfxMessageAt < 4000) { c.flash = gfxMessage; c.flashUntil = gfxMessageAt + 4000; }
         std::string message = now < c.flashUntil && !searching ? c.flash : statusFor(state);
         setText(page, QUEUE_PAGE_STATUS, c.status, message);
         // Searching layout: teal card, queue timer, CANCEL SEARCH in place of FIND MATCH.
@@ -1705,6 +2485,15 @@ void render(Context& c) {
                 mode == STAT_TODAY ? playedText(secondsToday)
                 : mode == STAT_OVERALL ? (overall < 0 ? "--" : std::to_string(overall))
                 : players < 0 ? "..." : std::to_string(players));
+        // GRAPHICS: the chosen one lit; the caption says when it takes a restart.
+        int chosen = gfxChosen;
+        if (c.gfxShown != chosen) {
+            ensure(page, QUEUE_PAGE_GFX_HIGH, chosen == GFX_HIGH);
+            ensure(page, QUEUE_PAGE_GFX_LOW, chosen == GFX_LOW);
+            c.gfxShown = chosen;
+        }
+        setText(page, QUEUE_PAGE_GFX_CAPTION, c.gfxCaption,
+                chosen == GFX_UNKNOWN ? "GRAPHICS - NOT SET UP" : !texlod::deviceHooked && chosen != gfxLoaded ? "RESTART ECHO" : "GRAPHICS");
     }
 }
 
@@ -1718,7 +2507,8 @@ void gate(Context& c, void* cs) {
     U count = at<U>(resource, 0x30);
     unsigned n = at<unsigned short>(cs, 0x10a);
     bool ready = c.views[0].p && c.views[1].p && c.views[2].p;
-    U key = U(c.page == Page::Queue) | U(matchmaking(c.state)) << 1 | U(ready) << 2 | U(tabletFault.load()) << 3 | U(n) << 8 | count << 24;
+    U key = U(c.page == Page::Queue) | U(matchmaking(c.state)) << 1 | U(ready) << 2 | U(tabletFault.load()) << 3 | U(c.setup) << 4 |
+            U(n) << 8 | count << 24;
     if (key == c.gateKey) return;
     c.gateKey = key;
     if (count > 8192 || n > count) { failTablet("unexpected native button pool layout"); return; }
@@ -1742,11 +2532,14 @@ void gate(Context& c, void* cs) {
         bool hide;
         if (tabletFault) hide = isOurs(b.name);                 // stock buttons back to normal
         else if (b.name == QUEUE_TAB) hide = !ready;
+        else if (keyFor(b.name)) hide = c.page != Page::Queue || !c.setup;
+        else if (c.setup && c.page == Page::Queue) hide = true;   // the PLAY page's own buttons, under the setup page
         else if (b.name == QUEUE_START) hide = c.page != Page::Queue || matchmaking(c.state);
         else if (b.name == QUEUE_CANCEL) hide = c.page != Page::Queue || !matchmaking(c.state);
         else if (b.name == QUEUE_LOBBY) hide = c.page != Page::Queue || matchmaking(c.state);
         else if (b.name == QUEUE_PRIVATE) hide = c.page != Page::Queue || matchmaking(c.state);
-        else if (b.name == QUEUE_STATS) hide = c.page != Page::Queue;
+        else if (b.name == QUEUE_STATS || b.name == QUEUE_GFX_HIGH || b.name == QUEUE_GFX_LOW || b.name == QUEUE_CLIP ||
+                 b.name == QUEUE_CLIP_KEY) hide = c.page != Page::Queue;
         else hide = c.page == Page::Queue;                       // stock page content (another mod's page hides it itself)
         if (hide && !c.masked.count(b.handle)) {
             if (b.reasons & MASK_BIT) {  // someone else's: it's off already, and theirs to turn back on
@@ -1793,6 +2586,7 @@ void buttonTick(void* cs) {
     }
     auto it = contexts.find(at<void*>(cs, 0x80));
     if (it == contexts.end() || !it->second.views[0].p) return;
+    graphicsLiveTick();
     U t1 = qpcNs();
     gate(it->second, cs);
     U t2 = qpcNs();
@@ -1822,6 +2616,7 @@ void perfReport() {
          "%.0f tablet updates/s (PLAY page %s)",
          frames / secs, (ns + hookNs + soundNs) / 1e6 / secs, ns / 1e6 / secs, hk / 1e6 / secs, g / 1e6 / secs, r / 1e6 / secs,
          hookNs / 1e6 / secs, soundNs / 1e6 / secs, sounds / secs, s / secs, t / secs, a / secs, m / secs, ticks / secs, page ? "open" : "closed");
+    texlod::report();
 }
 
 // Closes another mod's page (see Kick). Called without our lock held: the other mod's dispatch
@@ -1881,12 +2676,38 @@ void unload(void* p, U a, U b, U c) {
             if (kind == 1) ctx.navState = -1;
             if (kind == 2) {
                 ctx.status.clear(), ctx.timer.clear(), ctx.timerCaption.clear(), ctx.statCaption.clear(), ctx.matches.clear();
+                ctx.gfxCaption.clear(), ctx.titleText.clear(), ctx.subtitleText.clear();
+                ctx.modsShown = -1;
                 ctx.searchShown = -1;
+                ctx.gfxShown = -2;
             }
             canvases.erase(it);
         }
     }
     unloadOriginal(p, a, b, c);
+}
+
+// The CLIP HOTKEY page, starting from the saved hotkey.
+void openClipSetup(Context& c) {
+    c.setup = true;
+    c.ctrl = c.shift = c.alt = false;
+    c.key.clear();
+    Keys keys;
+    if (parseKeys(clipKeysSpec(), keys))
+        for (WORD vk : keys.vks) {
+            if (vk == VK_CONTROL) c.ctrl = true;
+            else if (vk == VK_SHIFT) c.shift = true;
+            else if (vk == VK_MENU) c.alt = true;
+        }
+    std::string spec = clipKeysSpec();
+    size_t plus = spec.rfind('+');
+    std::string last = spec.substr(plus == std::string::npos ? 0 : plus + 1);
+    for (auto& k : QUEUE_KEYS) {
+        std::string label = k.label, lower;
+        for (char ch : label) lower += char(tolower(static_cast<unsigned char>(ch)));
+        if (lower == last && label != "CTRL" && label != "SHIFT" && label != "ALT") c.key = label;
+    }
+    logf("tablet: CLIP HOTKEY page opened");
 }
 
 void onEvent(void* gs, U event, U actor, U component, int arg) {
@@ -1907,6 +2728,8 @@ void onEvent(void* gs, U event, U actor, U component, int arg) {
         c.sawOther = true;
     } else if (component == QUEUE_TAB) {
         if (c.page != Page::Queue) { logf("tablet: PLAY page selected"); playSound(SOUND_CLICK); }
+        static bool asked = false;   // first time this run with no clip key: ask for it
+        if (!asked && clipKeysSpec().empty()) { asked = true; openClipSetup(c); }
         if (c.page == Page::Other) kick = Kick{gs, actor, c.stockTab, arg};
         c.page = Page::Queue;
     } else if (component == QUEUE_START && c.page == Page::Queue) {
@@ -1940,6 +2763,63 @@ void onEvent(void* gs, U event, U actor, U component, int arg) {
         c.flashUntil = GetTickCount64() + 3000;
         lastResult = int(Queued::None);
         if (!fault) requestQueue("PRIVATE MATCH", true);
+    } else if (const QueueKey* k = c.page == Page::Queue && c.setup ? keyFor(component) : nullptr) {
+        playSound(SOUND_CLICK);
+        std::string label = k->label;
+        if (label == "CTRL") c.ctrl = !c.ctrl;
+        else if (label == "SHIFT") c.shift = !c.shift;
+        else if (label == "ALT") c.alt = !c.alt;
+        else if (label == "CANCEL") { c.setup = false; logf("tablet: CLIP HOTKEY cancelled"); }
+        else if (label == "NO CLIP APP") {   // no clipping software: not asked again, CLIP does nothing
+            WritePrivateProfileStringW(L"clip", L"keys", L"none", iniPath().c_str());
+            c.setup = false;
+            c.flash = "CLIP OFF - NO CLIP APP (KEY TO SET ONE)";
+            c.flashUntil = GetTickCount64() + 4000;
+            logf("tablet: no clip app");
+        }
+        else if (label == "SAVE") {
+            if (c.key.empty()) { c.pickFirstUntil = GetTickCount64() + 2500; return; }
+            std::string spec = std::string(c.ctrl ? "ctrl+" : "") + (c.shift ? "shift+" : "") + (c.alt ? "alt+" : "");
+            for (char ch : c.key) spec += char(tolower(static_cast<unsigned char>(ch)));
+            std::wstring wide(spec.begin(), spec.end());
+            WritePrivateProfileStringW(L"clip", L"keys", wide.c_str(), iniPath().c_str());
+            c.setup = false;
+            Keys keys;
+            parseKeys(spec, keys);
+            c.flash = "CLIP HOTKEY SAVED: " + keys.text;
+            c.flashUntil = GetTickCount64() + 4000;
+            logf("tablet: CLIP HOTKEY saved: %s", spec.c_str());
+        } else {
+            c.key = label;
+        }
+    } else if (component == QUEUE_CLIP_KEY && c.page == Page::Queue) {
+        playSound(SOUND_CLICK);
+        openClipSetup(c);
+    } else if (component == QUEUE_CLIP && c.page == Page::Queue && clipKeysSpec().empty()) {
+        playSound(SOUND_CLICK);
+        openClipSetup(c);
+    } else if (component == QUEUE_CLIP && c.page == Page::Queue && clipKeysSpec() == "none") {
+        playSound(SOUND_CLICK);
+        c.flash = "NO CLIP APP - TAP KEY TO PICK ONE";
+        c.flashUntil = GetTickCount64() + 3000;
+    } else if (component == QUEUE_CLIP && c.page == Page::Queue) {
+        logf("tablet: CLIP pressed");
+        playSound(SOUND_CLICK);
+        Keys keys;
+        std::string spec = clipKeysSpec();
+        c.flash = parseKeys(spec, keys) ? "CLIP - PRESSED " + keys.text : "CLIP KEYS NOT SET - SEE ECHOLAZYTABLET.INI";
+        c.flashUntil = GetTickCount64() + 3000;
+        if (HANDLE t = CreateThread(nullptr, 0, pressClipKeys, nullptr, 0, nullptr)) CloseHandle(t);
+    } else if ((component == QUEUE_GFX_HIGH || component == QUEUE_GFX_LOW) && c.page == Page::Queue) {
+        int mode = component == QUEUE_GFX_LOW ? GFX_LOW : GFX_HIGH;
+        logf("tablet: GRAPHICS %s pressed", mode == GFX_LOW ? "LOW" : "HIGH");
+        playSound(SOUND_CLICK);
+        if (gfxBusy.exchange(true)) return;
+        c.flash = "SWITCHING GRAPHICS...";
+        c.flashUntil = GetTickCount64() + 3000;
+        // Off the game thread: it reads and writes a few MB of files.
+        if (HANDLE t = CreateThread(nullptr, 0, graphicsSwitch, reinterpret_cast<LPVOID>(intptr_t(mode)), 0, nullptr)) CloseHandle(t);
+        else gfxBusy = false;
     }
 }
 
@@ -2066,7 +2946,9 @@ void installTablet() {
 }
 
 void initialize() {
-    logf("EchoLazyTablet v3.13 starting (pid %lu)", GetCurrentProcessId());
+    logf("EchoLazyTablet v3.14 starting (pid %lu)", GetCurrentProcessId());
+    graphicsStartup();   // first: Echo reads its settings soon after start
+    if (liveTextures()) texlod::loadAll();
     if (!verifyExecutable()) { fault = tabletFault = true; logf("EchoLazyTablet disabled"); return; }
     loadSettings();
     loadToday();

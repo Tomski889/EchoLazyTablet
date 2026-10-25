@@ -45,6 +45,20 @@ CANCEL_BUTTON = sym('echo_queue_cancel_button_v1')
 LOBBY_BUTTON = sym('echo_queue_lobby_button_v1')
 STATS_BUTTON = sym('echo_queue_stats_button_v1')
 PRIVATE_BUTTON = sym('echo_queue_private_button_v1')
+GFX_HIGH_BUTTON = sym('echo_queue_gfx_high_button_v1')
+GFX_LOW_BUTTON = sym('echo_queue_gfx_low_button_v1')
+CLIP_BUTTON = sym('echo_queue_clip_button_v1')
+CLIP_KEY_BUTTON = sym('echo_queue_clip_key_button_v1')    # opens the CLIP HOTKEY page
+
+# The CLIP HOTKEY page's keyboard: (label, what the plugin does with it). Its touch areas are
+# echo_queue_key_<label>_v1.
+KEYBOARD_ROWS = (['F1', 'F2', 'F3', 'F4', 'F5', 'F6', 'F7', 'F8', 'F9', 'F10', 'F11', 'F12'],
+                 list('1234567890'), list('QWERTYUIOP'), list('ASDFGHJKL'), list('ZXCVBNM'))
+KEYBOARD_EXTRA = ('CTRL', 'SHIFT', 'ALT', 'NO CLIP APP', 'SAVE', 'CANCEL')
+
+
+def key_button(label):
+    return sym(f"echo_queue_key_{label.lower().replace(' ', '_')}_v1")
 OURS = {PAGE, OVERLAY, ICON_TEXTURE}      # resources only EchoLazyTablet has
 
 # Geometry in tablet canvas pixels (1024 px = 0.3 m).
@@ -58,8 +72,12 @@ SCALE = .3 / 1024                         # touch areas are in metres
 
 CARD = (2, 8, PAGE_W - 2, 520)
 MODE_TILE = (44 + DX, 30, 164 + DX, 150)
-BUTTON = (64 + DX, 198, 878 + DX, 284)
-COLUMNS = (171 + DX, 471 + DX, 771 + DX)
+BUTTON = (64 + DX, 198, 620 + DX, 284)          # FIND MATCH / CANCEL SEARCH
+CLIP = (636 + DX, 198, 790 + DX, 284)            # CLIP: presses the player's clip keybind
+CLIP_KEY = (798 + DX, 198, 878 + DX, 284)        # KEY: sets that keybind
+KEYBOARD = (4, 106, 1020, 658)                   # the CLIP HOTKEY keyboard: the whole screen under the title strip
+OVERLAY_H = 768                                  # (nothing past the tablet's edge is drawn: tried, 25 Oct)
+COLUMNS = (118 + DX, 353 + DX, 589 + DX, 824 + DX)
 ROW_CAPTION, ROW_BOX = (318, 350), (358, 468)
 
 ATLAS = 0x79563b60c7895d4e                # the tablet UI atlas, 2048 x 3424 BC7
@@ -74,6 +92,7 @@ ROW_BORDER_UV = dict(tl=(0.793, 0.0059, 0.8535, 0.0664), t=(0.4688, 0.0059, 0.52
                      bl=(0.793, 0.1309, 0.8535, 0.1914), b=(0.4688, 0.1309, 0.5293, 0.1914), br=(0.5312, 0.1309, 0.5918, 0.1914))
 FIND_FILL, FIND_BORDER = (.05, .46, .45, 1), (.2, .78, .75, 1)
 CANCEL_FILL, CANCEL_BORDER = (.5, .24, .22, 1), (.66, .32, .29, 1)
+CLIP_FILL, CLIP_BORDER = (.6, .32, .05, 1), (.9, .55, .15, 1)
 TAB_IDLE_UV = (0.6904, 0.3645, 0.7393, 0.3937)
 TAB_SELECTED_UV = (0.6899, 0.3297, 0.7393, 0.3595)
 BGRA_TEMPLATE = 0x84b9a06506af66fe        # stock 128x128 B8G8R8A8 texture (header template)
@@ -328,7 +347,7 @@ def build(m):
     # Everything EchoLazyTablet shows is one overlay canvas covering the tablet, shown by the root's
     # unused element 6, so no canvas another mod checks changes its element count. The PLAY
     # page is element 0 (its background) and its children; then the title strip and the tab.
-    page = Canvas.empty(raw_donor, 1024, 768)
+    page = Canvas.empty(raw_donor, 1024, OVERLAY_H)
     struct.pack_into('<Q', page.header, 0, OVERLAY)
     group = -1
 
@@ -362,7 +381,7 @@ def build(m):
     e['timer'] = text('echo_queue_timer_v1', 'READY', (620 + DX, 30, 896 + DX, 112), 64, WHITE, align=1, capacity=16)
     e['timer_caption'] = text('echo_queue_timer_caption_v1', 'STATUS', (620 + DX, 112, 896 + DX, 142), 20, ACCENT, align=1, capacity=24)
 
-    def lobby_row(name, rect, fill, border, title, hidden=False):
+    def lobby_row(name, rect, fill, border, title, hidden=False, size=46):
         x0, y0, x1, y1 = rect
         w, h = x1 - x0, y1 - y0
         row = sprite(name, rect, ROW_BACK_UV, WHITE, hidden=hidden, texture=ROW_ATLAS)
@@ -372,15 +391,17 @@ def build(m):
                       bl=(0, h - k, k, h), b=(k, h - k, w - k, h), br=(w - k, h - k, w, h))
         for piece, r in pieces.items():
             sprite(f'{name}_{piece}', r, ROW_BORDER_UV[piece], border, parent=row, texture=ROW_ATLAS)
-        label = text(name + '_title', title, (24, 0, w - 24, h), 46, WHITE)
+        label = text(name + '_title', title, (8, 0, w - 8, h), size, WHITE)
         struct.pack_into('<i', page.elements[label], 0x5c, row)
         return row, label
 
     e['find'], e['find_text'] = lobby_row('echo_queue_find_row_v1', BUTTON, FIND_FILL, FIND_BORDER, 'FIND MATCH')
     e['cancel'], e['cancel_text'] = lobby_row('echo_queue_cancel_row_v1', BUTTON, CANCEL_FILL, CANCEL_BORDER, 'CANCEL SEARCH', hidden=True)
+    e['clip'], e['clip_text'] = lobby_row('echo_queue_clip_row_v1', CLIP, CLIP_FILL, CLIP_BORDER, 'CLIP')
+    lobby_row('echo_queue_clip_key_row_v1', CLIP_KEY, CLIP_FILL, CLIP_BORDER, 'KEY', size=30)
 
     def action_box(key, cx, caption, label, icon=None, busy=True, capacity=0):
-        e[key + '_caption'] = text(f'echo_queue_caption_{cx}_v1', caption, (cx - 140, ROW_CAPTION[0], cx + 140, ROW_CAPTION[1]), 22, WHITE, capacity=capacity)
+        e[key + '_caption'] = text(f'echo_queue_caption_{cx}_v1', caption, (cx - 115, ROW_CAPTION[0], cx + 115, ROW_CAPTION[1]), 22, WHITE, capacity=capacity)
         rect = (cx - 96, ROW_BOX[0] + 8, cx + 96, ROW_BOX[1] + 8)
         w, h = rect[2] - rect[0], rect[3] - rect[1]
         sprite(f'echo_queue_{key}_base_v1', rect, CARD_UV, WHITE)
@@ -401,8 +422,58 @@ def build(m):
     lobby_rect = action_box('lobby', COLUMNS[1], 'LOBBY', 'GO', icon='house')
     stats_rect = action_box('stats', COLUMNS[2], 'HOURS TODAY', '0 MINS', busy=False, capacity=16)
 
+    # GRAPHICS: HIGH and LOW side by side in the last column; the plugin lights the chosen one.
+    cx = COLUMNS[3]
+    e['gfx_caption'] = text(f'echo_queue_caption_{cx}_v1', 'GRAPHICS', (cx - 115, ROW_CAPTION[0], cx + 115, ROW_CAPTION[1]), 22, WHITE, capacity=24)
+    gfx_rects = {}
+    for key, label, x0, x1 in (('gfx_high', 'HIGH', cx - 96, cx - 4), ('gfx_low', 'LOW', cx + 4, cx + 96)):
+        rect = (x0, ROW_BOX[0] + 8, x1, ROW_BOX[1] + 8)
+        w, h = x1 - x0, rect[3] - rect[1]
+        sprite(f'echo_queue_{key}_base_v1', rect, CARD_UV, WHITE)
+        e[key] = sprite(f'echo_queue_{key}_box_v1', rect, CARD_ACTIVE_UV, WHITE, hidden=True)
+        sprite(f'echo_queue_{key}_fill_v1', (6, 6, w - 6, h - 6), ROW_FILL_UV, (*FIND_FILL[:3], .55), parent=e[key], texture=ROW_ATLAS)
+        e[key + '_text'] = text(f'echo_queue_{key}_text_v1', label, rect, 34, WHITE)
+        gfx_rects[key] = rect
+
+    # The CLIP HOTKEY page: shown instead of the PLAY page (first time, or from KEY), a keyboard over
+    # the whole screen under the title strip to pick the clip recorder's hotkey with. The plugin
+    # puts the combo picked so far in the title strip and lights the modifiers that are on.
+    page_group = group
+    group = e['keyboard'] = sprite('echo_queue_keyboard_v1', KEYBOARD, screen_uv(KEYBOARD), WHITE, parent=-1, hidden=True)
+    kw, kh_all = KEYBOARD[2] - KEYBOARD[0], KEYBOARD[3] - KEYBOARD[1]
+    sprite('echo_queue_keyboard_card_v1', (0, 0, kw, kh_all), CARD_UV, WHITE)
+    key_rects = {}
+    pitch, kh, row_pitch, top = 84, 80, 90, 6
+
+    def key(label, rect, size, fill=None, toggle=False):
+        x0, y0, x1, y1 = rect
+        w, h = x1 - x0, y1 - y0
+        n = label.lower().replace(' ', '_')
+        if fill:
+            sprite(f'echo_queue_key_{n}_base_v1', rect, ROW_FILL_UV, fill, texture=ROW_ATLAS)
+        else:
+            sprite(f'echo_queue_key_{n}_base_v1', rect, CARD_UV, WHITE)
+        if toggle:   # lit while that modifier is on
+            e[f'mod_{n}'] = lit = sprite(f'echo_queue_key_{n}_on_v1', rect, CARD_ACTIVE_UV, WHITE, hidden=True)
+            sprite(f'echo_queue_key_{n}_on_fill_v1', (4, 4, w - 4, h - 4), ROW_FILL_UV, (*FIND_FILL[:3], .7), parent=lit, texture=ROW_ATLAS)
+        text(f'echo_queue_key_{n}_text_v1', label, rect, size, WHITE)
+        key_rects[label] = rect
+
+    for r, labels in enumerate(KEYBOARD_ROWS):
+        y0 = top + r * row_pitch
+        x = kw / 2 - pitch * len(labels) / 2
+        for i, label in enumerate(labels):
+            key(label, (x + i * pitch + 4, y0, x + (i + 1) * pitch - 4, y0 + kh), 34 if len(label) > 1 else 46)
+    y0 = top + len(KEYBOARD_ROWS) * row_pitch
+    for label, x0, x1 in (('CTRL', 16, 156), ('SHIFT', 166, 306), ('ALT', 316, 456)):
+        key(label, (x0, y0, x1, y0 + kh), 34, toggle=True)
+    key('NO CLIP APP', (466, y0, 686, y0 + kh), 30, fill=CLIP_FILL)   # for players without clipping software
+    key('SAVE', (kw - 320, y0, kw - 170, y0 + kh), 40, fill=FIND_FILL)
+    key('CANCEL', (kw - 160, y0, kw - 16, y0 + kh), 32, fill=CANCEL_FILL)
+    key_rects = {k: (r[0] + KEYBOARD[0], r[1] + KEYBOARD[1], r[2] + KEYBOARD[0], r[3] + KEYBOARD[1]) for k, r in key_rects.items()}
+
     # The title strip (a cover over the stock title, PLAY's own title) and the tab, top level.
-    page_group, group = group, -1
+    group = -1
     title_area = (54, 22, 822, 103)
     cover = sprite('echo_queue_title_cover_v1', title_area, screen_uv(title_area), WHITE, hidden=True)
     header = page.append(panel_template, 'echo_queue_header_background_v1', (60, 40, 210, 108), hidden=True)
@@ -421,7 +492,7 @@ def build(m):
     slot[0:8] = six[0:8]
     struct.pack_into('<I', slot, 0x10, 0)
     struct.pack_into('<4f', slot, 0x24, 0, 0, 0, 0)
-    struct.pack_into('<4f', slot, 0x34, 0, 0, 1024, 768)
+    struct.pack_into('<4f', slot, 0x34, 0, 0, 1024, OVERLAY_H)
     struct.pack_into('<iI', slot, 0x5c, -1, ROOT_SLOT)
     struct.pack_into('<Q', slot, 0x78, OVERLAY)
     root.elements[ROOT_SLOT] = slot
@@ -454,6 +525,12 @@ def build(m):
     add_button(LOBBY_BUTTON, lobby_rect)
     add_button(STATS_BUTTON, stats_rect)
     add_button(PRIVATE_BUTTON, private_rect)
+    add_button(CLIP_BUTTON, CLIP)
+    add_button(CLIP_KEY_BUTTON, CLIP_KEY)
+    for label, rect in key_rects.items():   # the keyboard is in overlay pixels, not the page's
+        add_button(key_button(label), rect, on_page=False)
+    add_button(GFX_HIGH_BUTTON, gfx_rects['gfx_high'])
+    add_button(GFX_LOW_BUTTON, gfx_rects['gfx_low'])
     moved_rows = {r for t in tabs for r in t['rows']}
     for r, old in enumerate(old_rows):
         assert r in moved_rows or buttons.rows[r] == old
@@ -573,9 +650,12 @@ def page_header(built):
     return ('// Generated by installer/tablet.py -- do not edit.\n#pragma once\n#include <cstdint>\n'
             f'constexpr uint64_t QUEUE_TAB=0x{TAB_BUTTON:016x}, QUEUE_START=0x{START_BUTTON:016x}, '
             f'QUEUE_CANCEL=0x{CANCEL_BUTTON:016x}, QUEUE_LOBBY=0x{LOBBY_BUTTON:016x}, QUEUE_PRIVATE=0x{PRIVATE_BUTTON:016x}, '
-            f'QUEUE_STATS=0x{STATS_BUTTON:016x};\n'
+            f'QUEUE_STATS=0x{STATS_BUTTON:016x}, QUEUE_GFX_HIGH=0x{GFX_HIGH_BUTTON:016x}, QUEUE_GFX_LOW=0x{GFX_LOW_BUTTON:016x}, QUEUE_CLIP=0x{CLIP_BUTTON:016x}, QUEUE_CLIP_KEY=0x{CLIP_KEY_BUTTON:016x};\n'
             f"constexpr unsigned QUEUE_OVERLAY_ELEMENTS={built['layout']['overlay_elements']}, QUEUE_LAYOUT_VERSION={built['layout']['version']};\n"
-            + ''.join(f'constexpr unsigned QUEUE_PAGE_{k.upper()}={v};\n' for k, v in e.items()))
+            + ''.join(f'constexpr unsigned QUEUE_PAGE_{k.upper()}={v};\n' for k, v in e.items())
+            + 'struct QueueKey { uint64_t name; const char* label; };\nconstexpr QueueKey QUEUE_KEYS[] = {'
+            + ', '.join(f'{{0x{key_button(k):016x}, "{k}"}}' for k in [k for row in KEYBOARD_ROWS for k in row] + list(KEYBOARD_EXTRA))
+            + '};\n')
 
 
 if __name__ == '__main__':

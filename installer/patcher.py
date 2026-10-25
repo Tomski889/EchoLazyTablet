@@ -19,9 +19,10 @@ import winreg
 from pathlib import Path
 
 import echodata as E
+import graphics
 import tablet
 
-VERSION = '3.13'
+VERSION = '3.14'
 EXE_TIMESTAMP = 1683152886
 DATA = Path('_data/5932408047/rad15/win10')
 STOCK_PACKAGES = 3
@@ -38,6 +39,35 @@ OUR_DLLS = ('echolazytablet.dll', 'echoqueue.dll')
 
 class InstallError(Exception):
     """Something the user has to sort out; the message says what, in plain words."""
+
+
+def missing_message(game, package):
+    """Plain words for a package file the manifest needs but the game folder doesn't have."""
+    try:
+        m = game.load()
+        users = set(m.users_of(package))
+    except Exception:
+        users = set()
+    try:
+        ours = (game.read_record() or {}).get('package') == package
+    except InstallError:
+        ours = False
+    tablet_parts = {(tablet.CV, tablet.ROOT_CANVAS): 'the hand tablet', (tablet.CV, tablet.NAV_CANVAS): 'its tab bar',
+                    (tablet.BUTTONS, tablet.LEVEL): 'its touch areas'}
+    holds = [name for key, name in tablet_parts.items() if key in users]
+    what = f" It holds {', '.join(holds)}." if holds else ''
+    if ours:
+        who = "It's EchoLazyTablet's own package."
+        fix = 'reinstall Echo VR from the Meta Horizon app'
+    elif holds:  # a tablet mod's package (Echo Arcade puts its tab, and the whole tablet, in one)
+        who = 'A tablet mod made it and it has since been deleted or only half removed (most likely Echo Arcade).'
+        fix = "run that mod's installer again (Echo Arcade: its setup, or its restore), or reinstall Echo VR from the Meta Horizon app"
+    else:
+        who = 'Another mod most likely deleted it or was only half removed (Echo Mods and Echo Arcade add packages there).'
+        fix = 'reinstall that mod (in Echo Mods, make the lobby again), or reinstall Echo VR from the Meta Horizon app'
+    return (f"Echo VR's data points at package _{package}, but that file is missing from the game folder "
+            f"(packages\\{E.MID}_{package} in the game's _data folder).{what} {who}\n"
+            f'Fix: {fix}, then press Check again.')
 
 
 def payload_dir():
@@ -153,8 +183,16 @@ def check(game, need_closed=True):
     problems = []
     if not is_game(game.folder):
         return [f'{game.folder} is not an Echo VR folder.']
-    if exe_timestamp(game.bin / 'echovr.exe') != EXE_TIMESTAMP:
-        problems.append('This Echo VR build is not the one EchoLazyTablet was made for (1683152886); EchoLazyTablet would switch itself off.')
+    try:
+        found = exe_timestamp(game.bin / 'echovr.exe')
+    except (OSError, struct.error):
+        found = None
+    if found != EXE_TIMESTAMP:
+        import datetime
+        what = ('its echovr.exe could not be read (damaged or still downloading)' if found is None else
+                f'this folder has build {found} (from {datetime.datetime.fromtimestamp(found, datetime.timezone.utc):%d %b %Y})')
+        problems.append(f'This Echo VR build is not the one EchoLazyTablet was made for (1683152886, from 3 May 2023): '
+                        f'{what}. EchoLazyTablet would switch itself off. EchoVRCE needs that final build too.')
     if not (game.bin / 'dinput8.dll').is_file():
         problems.append('EchoLoader is not installed (bin\\win10\\dinput8.dll is missing). Install EchoLoader first; EchoLazyTablet is one of its plugins.')
     if need_closed and echo_running():
@@ -358,6 +396,8 @@ def scan(game):
         info['preview'] = tablet.tab_preview(base, built)
     except (tablet.TabletError, InstallError) as e:
         info['problems'].append(str(e))
+    except E.MissingPackage as e:
+        info['problems'].append(missing_message(game, e.package))
     info['echomods'] = echomods_present()
     if info['echomods'] and n is not None and echomods_snapshot_stale(game, record):
         info['notes'].append("Echo Mods' saved lobby snapshot is from before this EchoLazyTablet: if Echo Mods rebuilds "
@@ -399,9 +439,20 @@ def _no_stage(name):
     pass
 
 
+def _plain(fn):
+    """A missing package file, from anywhere in `fn`, as an InstallError in plain words."""
+    def wrapped(game, *args, **kwargs):
+        try:
+            return fn(game, *args, **kwargs)
+        except E.MissingPackage as e:
+            raise InstallError(missing_message(game, e.package)) from None
+    return wrapped
+
+
+@_plain
 def install(game, log=print, stage=_no_stage):
     """Install, or repair: EchoLazyTablet out, then the tab rebuilt on the tablet as it is now.
-    stage(name) is called as it goes: check, build, write, verify, plugin (for a progress bar)."""
+    stage(name) is called as it goes: check, build, write, verify, plugin, graphics (for a progress bar)."""
     stage('check')
     problems = check(game)
     if problems:
@@ -409,6 +460,10 @@ def install(game, log=print, stage=_no_stage):
     payload = payload_dir()
     if not (payload / 'EchoLazyTablet.dll').is_file():
         raise InstallError('The installer is missing EchoLazyTablet.dll.')
+    # The GRAPHICS LOW files are built from the tablet data as it ends up: the game's own manifest
+    # back first (the player's choice of HIGH or LOW is kept), LOW rebuilt at the end.
+    was_low = graphics.is_low(game.folder)
+    graphics.undo(game.folder, log, keep_ini=True)
     m, old, unused = without_echoqueue(game)
     if old is not None:
         log(f'Took the existing EchoLazyTablet out of the tablet data (package _{old}).')
@@ -468,6 +523,15 @@ def install(game, log=print, stage=_no_stage):
     _set_loader(game, True)
     echomods_keep(game, True, log)
     log(f"Installed EchoLazyTablet v{VERSION}: PLAY tab added to package _{number}, {built['tabs']} tabs on the bar.")
+    stage('graphics')
+    try:
+        graphics.apply(game.folder, log)
+        if not was_low:
+            graphics.use_high(game.folder)
+        log(f"GRAPHICS {'LOW' if was_low else 'HIGH'} is on; the other button switches after a restart of Echo VR.")
+    except Exception as e:   # the PLAY tab works without it; the GRAPHICS box then says NOT SET UP
+        graphics.undo(game.folder, lambda _: None)
+        log(f'Low graphics could not be set up ({e}); everything else is installed.')
     return built
 
 
@@ -483,6 +547,7 @@ def launch(game):
                      creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP)
 
 
+@_plain
 def uninstall(game, log=print, stage=_no_stage):
     stage('check')
     problems = check(game)
@@ -490,6 +555,7 @@ def uninstall(game, log=print, stage=_no_stage):
         raise InstallError('\n'.join(problems))
     if echo_running():
         raise InstallError('Echo VR is running. Close it first.')
+    graphics.undo(game.folder, log)
     m, n, unused = without_echoqueue(game)
     stage('write')
     if n is not None:

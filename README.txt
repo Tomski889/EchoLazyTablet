@@ -1,4 +1,4 @@
-EchoLazyTablet 3.13 - Echo Arena matchmaking from your hand tablet (Echo VR, EchoVRCE)
+EchoLazyTablet 3.14 - Echo Arena matchmaking from your hand tablet (Echo VR, EchoVRCE)
 
 What it does
   A PLAY tab, first on the hand tablet's tab bar:
@@ -7,7 +7,14 @@ What it does
   * PRIVATE MATCH creates a private Echo Arena match on the game server with your lowest ping
     (EchoVRCE's matchmaker picks it), or on a server of your choice set in EchoLazyTablet.ini.
   * LOBBY takes you from a match back to the social lobby.
+  * CLIP presses your clip recorder's hotkey (Medal, ShadowPlay, OBS...), so you can save a clip
+    from inside VR. The first time you open PLAY, the tablet asks for that hotkey on a keyboard
+    page (KEY, next to CLIP, opens it again; NO CLIP APP if you don't use one); it's kept as
+    [clip] keys in EchoLazyTablet.ini.
   * A stats box (tap to switch): hours played today, matches overall, players online.
+  * GRAPHICS HIGH / LOW: LOW is "potato" graphics for more FPS (world textures 4 px, players,
+    banners and cosmetics 128 px, no shadows, lowest effects, the background effects outside the
+    arena and lobby hidden; your render resolution is left alone). Tap one, then restart Echo VR.
   * Joining or leaving fades the headset to black (after [fade] delay_ms).
   In a public match, FIND MATCH and PRIVATE MATCH wait until the match is over (no leaving your
   team mid-game); private matches and the lobby are fine.
@@ -43,6 +50,11 @@ What it changes in the game folder
   bin\win10\echoloader.json. In _data\...\win10: one package (packages\48037dc70b0ecab2_<n>), the
   manifest entries for the tablet root, tab bar, touch areas, the PLAY page and its icon, and
   manifests\48037dc70b0ecab2.echoqueue.json (what those entries pointed at before).
+  GRAPHICS LOW: one more package of small textures, manifests\48037dc70b0ecab2.potato-high / .potato-low
+  / .potato.json (the two manifests the buttons switch between) and plugins\EchoLazyTablet.graphics.ini
+  (your graphics settings as they were, and the LOW ones); the buttons also set those in Echo's
+  settings file (%LOCALAPPDATA%\rad\loneecho\settings_mp_v2.json). Uninstall takes them all out and
+  puts your graphics settings back.
   The tab's art is drawn from the player's own copy of Echo's tablet art at install time; no
   game files ship with EchoLazyTablet.
 
