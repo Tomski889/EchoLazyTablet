@@ -178,6 +178,17 @@ class Game:
             return []
 
 
+def has_loader(game):
+    """EchoLoader as dinput8.dll (the first ones, Echo Mods'), or as dbgcore.dll (newer EchoVRCE
+    packages: the stock dbgcore.dll is a 45 KB Windows file, EchoLoader's says [EchoLoader] in it)."""
+    if (game.bin / 'dinput8.dll').is_file():
+        return True
+    try:
+        return b'[EchoLoader]' in (game.bin / 'dbgcore.dll').read_bytes()
+    except OSError:
+        return False
+
+
 def check(game, need_closed=True):
     """Problems that stop install/repair/uninstall: a list of plain-words messages."""
     problems = []
@@ -193,8 +204,9 @@ def check(game, need_closed=True):
                 f'this folder has build {found} (from {datetime.datetime.fromtimestamp(found, datetime.timezone.utc):%d %b %Y})')
         problems.append(f'This Echo VR build is not the one EchoLazyTablet was made for (1683152886, from 3 May 2023): '
                         f'{what}. EchoLazyTablet would switch itself off. EchoVRCE needs that final build too.')
-    if not (game.bin / 'dinput8.dll').is_file():
-        problems.append('EchoLoader is not installed (bin\\win10\\dinput8.dll is missing). Install EchoLoader first; EchoLazyTablet is one of its plugins.')
+    if not has_loader(game):
+        problems.append('EchoLoader is not installed (no bin\\win10\\dinput8.dll, and bin\\win10\\dbgcore.dll is not EchoLoader). '
+                        'Install EchoLoader first; EchoLazyTablet is one of its plugins.')
     if need_closed and echo_running():
         problems.append('Echo VR is running. Close it first.')
     return problems
