@@ -198,6 +198,15 @@ class Handler(BaseHTTPRequestHandler):
         if path in ('/api/install', '/api/uninstall'):
             STATE.run(path.rsplit('/', 1)[1])
             return self.send(200, STATE.view())
+        if path == '/api/graphics':   # the preview's GRAPHICS HIGH / LOW, as on the tablet
+            try:
+                if patcher.echo_running():
+                    raise patcher.InstallError('Close Echo VR first.')
+                patcher.graphics.switch(patcher.normalise(STATE.game) or STATE.game, body.get('mode') == 'low')
+                STATE.rescan()
+                return self.send(200, {'ok': True, **STATE.view()})
+            except (patcher.InstallError, patcher.graphics.GraphicsError, OSError) as e:
+                return self.send(200, {'ok': False, 'message': str(e)})
         if path == '/api/launch':
             try:
                 patcher.launch(patcher.Game(STATE.game))

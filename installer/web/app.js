@@ -159,6 +159,42 @@ function findButton() {
   return b;
 }
 
+// GRAPHICS HIGH / LOW: switches the game like the tablet's buttons do, ready for Echo's next start.
+let gfxNote = null;   // after a press: {mode} while the scan catches up, or {text} when it couldn't switch; until
+function graphicsState() {
+  const s = view && view.scan;
+  const note = gfxNote && Date.now() < gfxNote.until ? gfxNote : null;
+  const running = /running/.test(s && s.problems ? s.problems.join(' ') : '');
+  const mode = note && note.mode ? note.mode : s ? s.graphics : null;
+  const caption = note && note.text ? note.text : running ? 'CLOSE ECHO FIRST' : s && s.graphics === null ? 'GRAPHICS - REPAIR' : 'GRAPHICS';
+  return { mode, caption, off: running || !s || s.graphics == null, bad: !!(note && note.text) };
+}
+
+function graphicsBox() {
+  const st = graphicsState();
+  const box = el('div');
+  const pair = el('p', 'gfx');
+  for (const [mode, label] of [['high', 'HIGH'], ['low', 'LOW']]) {
+    const b = el('button', (st.mode === mode ? 'on' : '') + (st.off ? ' off' : ''), label);
+    b.type = 'button';
+    b.disabled = st.off || st.mode === mode;
+    b.title = st.off ? st.caption.toLowerCase() : `${label.toLowerCase()} graphics from Echo's next start`;
+    b.onclick = () => setGraphics(mode);
+    pair.append(b);
+  }
+  box.append(el('small', st.bad ? 'bad' : '', st.caption), pair);
+  return box;
+}
+
+async function setGraphics(mode) {
+  gfxNote = { mode, until: Date.now() + 5000 };
+  renderTablet(view);
+  const r = await api('graphics', { mode });
+  gfxNote = r.ok ? { mode, until: Date.now() + 3000 }
+                 : { text: (r.message || "Couldn't switch").toUpperCase(), until: Date.now() + 5000 };
+  renderTablet(view);
+}
+
 function pageKinds(preview) {
   let stock = 0;
   return preview.map((t) => (t.ours ? 'play' : t.stock ? (STOCK_PAGES[stock++] || 'stock') : 'other'));
@@ -224,11 +260,7 @@ function renderPage(kind, tab, p) {
     for (const [label, value] of [['PRIVATE MATCH', 'CREATE'], ['LOBBY', '⌂ GO'], ['MATCHES OVERALL', p && p.matches != null ? String(p.matches) : '—']]) {
       const b = el('div'); b.append(el('small', '', label), el('span', '', value)); boxes.append(b);
     }
-    const gfx = el('div');
-    const pair = el('p', 'gfx');
-    pair.append(el('span', 'on', 'HIGH'), el('span', '', 'LOW'));
-    gfx.append(el('small', '', 'GRAPHICS'), pair);
-    boxes.append(gfx);
+    boxes.append(graphicsBox());
     page.replaceChildren(card, row, boxes);
   } else if (kind === 'home') {
     heading(name);
@@ -264,7 +296,7 @@ function renderTablet(v) {
   const preview = s && s.preview ? s.preview : [];
   const kinds = pageKinds(preview);
   const at = selected != null && selected < preview.length ? selected : Math.max(0, kinds.indexOf('play'));
-  const key = preview.map((t) => (t.png || t.text || '').slice(-24)).join('|') + '#' + at + '#' + JSON.stringify(p) + '#' + JSON.stringify(launchState());
+  const key = preview.map((t) => (t.png || t.text || '').slice(-24)).join('|') + '#' + at + '#' + JSON.stringify(p) + '#' + JSON.stringify(launchState()) + '#' + JSON.stringify(graphicsState());
   if (key === previewKey) return;
   previewKey = key;
   renderPage(preview.length ? kinds[at] : 'play', preview[at], p);

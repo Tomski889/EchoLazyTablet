@@ -268,6 +268,30 @@ def use_high(game):
         set_graphics(high)
 
 
+def mode(game):
+    """'low' or 'high' as the game data is now, or None (LOW not set up, or the data changed since)."""
+    data, man, high_path, low_path, record = paths(game)
+    if not (high_path.exists() and low_path.exists() and man.exists()):
+        return None
+    live = man.read_bytes()
+    return 'low' if live == low_path.read_bytes() else 'high' if live == high_path.read_bytes() else None
+
+
+def switch(game, low):
+    """What the tablet's GRAPHICS buttons do, from the installer: the manifest, Echo's settings and the
+    plugin's [graphics] mode. Takes effect when Echo next starts."""
+    if mode(game) is None:
+        raise GraphicsError('Low graphics are not set up on this game (or another tool changed the game data): run Repair.')
+    data, man, high_path, low_path, record = paths(game)
+    write_atomic(man, (low_path if low else high_path).read_bytes())
+    values = read_ini(ini_path(game)).get('low' if low else 'high')
+    if values:
+        set_graphics(values)
+    import ctypes
+    ctypes.windll.kernel32.WritePrivateProfileStringW('graphics', 'mode', 'low' if low else 'high',
+                                                      str(Path(game) / 'bin' / 'win10' / 'plugins' / 'EchoLazyTablet.ini'))
+
+
 def undo(game, log=print, keep_ini=False):
     """The game's own manifest (HIGH) back and the LOW files gone; Echo's settings back to HIGH."""
     data, man, high_path, low_path, record = paths(game)

@@ -410,6 +410,7 @@ def scan(game):
         info['problems'].append(str(e))
     except E.MissingPackage as e:
         info['problems'].append(missing_message(game, e.package))
+    info['graphics'] = graphics.mode(game.folder)   # 'low' / 'high', or None (LOW not set up)
     info['echomods'] = echomods_present()
     if info['echomods'] and n is not None and echomods_snapshot_stale(game, record):
         info['notes'].append("Echo Mods' saved lobby snapshot is from before this EchoLazyTablet: if Echo Mods rebuilds "

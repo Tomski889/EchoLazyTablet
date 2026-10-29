@@ -167,8 +167,12 @@ h2 { margin: 0; font-size: 30px; line-height: 1.15; font-weight: 700; letter-spa
 .clip { display: grid; place-items: center; width: 22%; font: 700 13px var(--mono); background: linear-gradient(#9a520d, #7a3f08); border: 1px solid #e68c26; }
 .clip.key { width: 11%; font-size: 9px; }
 .gfx { margin: 0; display: grid; grid-template-columns: 1fr 1fr; gap: 3px; }
-.boxes .gfx span { background: #111821; border-color: #2b3846; color: #9aa6b4; }
-.boxes .gfx span.on { background: #0d4b4a; border-color: var(--teal); color: #fff; box-shadow: inset 0 0 0 1px var(--teal); }
+.gfx button { font: 700 11px var(--mono); padding: 9px 0; background: #111821; border: 1px solid #2b3846; color: #9aa6b4; cursor: pointer;
+              transition: filter .15s, transform .12s; }
+.gfx button:hover:not(:disabled) { filter: brightness(1.4); transform: translateY(-1px); }
+.gfx button.on { background: #0d4b4a; border-color: var(--teal); color: #fff; box-shadow: inset 0 0 0 1px var(--teal); cursor: default; }
+.gfx button.off:not(.on) { cursor: default; opacity: .6; }
+.boxes small.bad { color: #ff7a7a; }
 .boxes { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
 .boxes div { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
 .boxes small { text-align: center; font: 600 8.5px var(--mono); color: #c9d2db; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
