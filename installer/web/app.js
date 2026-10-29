@@ -186,9 +186,29 @@ function peopleList(rows) {
 
 function message(text) { const m = el('div', 'tmsg'); m.append(el('span', '', text)); return m; }
 
+// The title strip's clock (PLAY only), 24-hour or 12-hour like the one in the game; 24H / 12H flips it.
+let clock12 = false;
+try { clock12 = localStorage.getItem('clock') === '12'; } catch (e) { /* no storage: 24-hour */ }
+
+function renderClock() {
+  const now = new Date();
+  const h = now.getHours(), m = String(now.getMinutes()).padStart(2, '0');
+  $('tclock').textContent = clock12 ? `${(h + 11) % 12 + 1}:${m} ${h < 12 ? 'AM' : 'PM'}` : `${String(h).padStart(2, '0')}:${m}`;
+  $('tfmt').textContent = clock12 ? '12H' : '24H';
+}
+
+$('tfmt').onclick = () => {
+  clock12 = !clock12;
+  try { localStorage.setItem('clock', clock12 ? '12' : '24'); } catch (e) { /* kept for this window only */ }
+  renderClock();
+};
+renderClock();
+setInterval(renderClock, 1000);
+
 function renderPage(kind, tab, p) {
   const page = $('tpage');
   page.className = 'page ' + kind;
+  $('tclock').hidden = $('tfmt').hidden = kind !== 'play';
   const name = (p && p.name) || 'YOU';
   const heading = (title, sub) => { $('ttitle').textContent = title; $('tsub').textContent = sub || ''; };
   if (kind === 'play') {
@@ -197,11 +217,19 @@ function renderPage(kind, tab, p) {
     const img = el('img', 'mini-disc'); img.src = 'disc.svg'; img.alt = '';
     const words = el('div'); words.append(el('b', '', 'ECHO ARENA'), el('i', '', 'PUBLIC MATCH'));
     card.append(img, words, launchButton());
+    // FIND MATCH with CLIP and KEY beside it, then the four boxes, as on the tablet in the game.
+    const row = el('div', 'findrow');
+    row.append(findButton(), el('span', 'clip', 'CLIP'), el('span', 'clip key', 'KEY'));
     const boxes = el('div', 'boxes');
     for (const [label, value] of [['PRIVATE MATCH', 'CREATE'], ['LOBBY', '⌂ GO'], ['MATCHES OVERALL', p && p.matches != null ? String(p.matches) : '—']]) {
       const b = el('div'); b.append(el('small', '', label), el('span', '', value)); boxes.append(b);
     }
-    page.replaceChildren(card, findButton(), boxes);
+    const gfx = el('div');
+    const pair = el('p', 'gfx');
+    pair.append(el('span', 'on', 'HIGH'), el('span', '', 'LOW'));
+    gfx.append(el('small', '', 'GRAPHICS'), pair);
+    boxes.append(gfx);
+    page.replaceChildren(card, row, boxes);
   } else if (kind === 'home') {
     heading(name);
     const level = el('div', 'hbox');
