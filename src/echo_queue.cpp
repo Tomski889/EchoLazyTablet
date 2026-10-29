@@ -42,6 +42,8 @@
 // pointer in Microsoft's ABI; this makes mingw's d3d12.h declare them that way.
 #define WIDL_EXPLICIT_AGGREGATE_RETURNS
 #include <d3d12.h>
+#include <mmdeviceapi.h>
+#include <propidl.h>
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -245,6 +247,8 @@ std::atomic<bool> accessBlocked{false};
 enum { STAT_TODAY, STAT_OVERALL, STAT_PLAYERS, STAT_MODES };
 constexpr const char* STAT_CAPTIONS[STAT_MODES] = {"HOURS TODAY", "MATCHES OVERALL", "PLAYERS ONLINE"};
 std::atomic<int> statMode{STAT_TODAY};
+// The clock in the title strip: 24-hour, or 12-hour with AM / PM ([clock] format=12); its switch flips it.
+std::atomic<bool> clock12{false};
 std::atomic<U> fadeDelayMs{FADE_DELAY_MS};  // button to black ([fade] delay_ms)
 
 // Our searches must also be joined (the menu's JoinFoundMatch step); see joinTick.
@@ -365,6 +369,7 @@ void loadSettings() {
     hotkey = parseKey(key);
     loadPrivateServer();
     statMode = std::clamp(int(GetPrivateProfileIntW(L"stats", L"show", STAT_TODAY, iniPath().c_str())), 0, STAT_MODES - 1);
+    clock12 = GetPrivateProfileIntW(L"clock", L"format", 24, iniPath().c_str()) == 12;
     fadeDelayMs = std::min<U>(GetPrivateProfileIntW(L"fade", L"delay_ms", FADE_DELAY_MS, iniPath().c_str()), 10000);
     if (readHex(L"captured", L"gametype", 0) == ECHO_ARENA) {
         captured.access = uint8_t(readHex(L"captured", L"access", 0));
@@ -1708,7 +1713,7 @@ DWORD WINAPI playersWatch(LPVOID) {
 // sends the account's ID and display name from the saved profile (xplatformid, displayname)
 // and gets back blocked or not. The answer is kept in EchoLazyTablet.ini ([access] blocked) for
 // when the service can't be reached; with no answer ever, EchoLazyTablet stays on.
-constexpr const char* ECHOQUEUE_VERSION = "3.15";
+constexpr const char* ECHOQUEUE_VERSION = "3.16";
 constexpr const wchar_t* ACCESS_HOST = L"echoqueue.dokuyegar.workers.dev";  // the deployed Worker (server/worker.js)
 constexpr U ACCESS_EVERY_MS = 15 * 60 * 1000;
 
@@ -1941,7 +1946,7 @@ struct Context {
     int gfxShown = -2;          // the graphics choice lit (GFX_*)
     bool setup = false;         // the CLIP HOTKEY page is up instead of the PLAY page
     bool ctrl = false, shift = false, alt = false;   // its modifiers, and its key ("" none yet)
-    std::string key, titleText, subtitleText;
+    std::string key, titleText, subtitleText, clockText, clockFormatText;
     U pickFirstUntil = 0;       // SAVE with no key: says so for a moment
     int modsShown = -1;
     int applied = -1;           // page visibility last applied (1 PLAY, 0 stock)
@@ -1972,7 +1977,7 @@ const QueueKey* keyFor(U n) {
 bool isOurs(U n) {
     if (keyFor(n) || n == QUEUE_CLIP_KEY) return true;
     return n == QUEUE_TAB || n == QUEUE_START || n == QUEUE_CANCEL || n == QUEUE_LOBBY || n == QUEUE_PRIVATE || n == QUEUE_STATS ||
-           n == QUEUE_GFX_HIGH || n == QUEUE_GFX_LOW || n == QUEUE_CLIP;
+           n == QUEUE_GFX_HIGH || n == QUEUE_GFX_LOW || n == QUEUE_CLIP || n == QUEUE_CLOCK;
 }
 
 void failTablet(const char* why) { tabletFault = true; logf("TABLET FAULT: %s -- PLAY tab off for this session", why); }
@@ -2401,6 +2406,8 @@ void render(Context& c) {
     if (overlay) {   // the PLAY page or, in its place, the CLIP HOTKEY page
         ensure(overlay, QUEUE_PAGE_PAGE, active && !c.setup);
         ensure(overlay, QUEUE_PAGE_KEYBOARD, active && c.setup);
+        for (unsigned i : {QUEUE_PAGE_CLOCK, QUEUE_PAGE_CLOCK_FORMAT, QUEUE_PAGE_CLOCK_FORMAT_TEXT})  // (the hotkey needs the room)
+            ensure(overlay, i, active && !c.setup);
     }
     if (overlay && active) {   // the title strip: PLAY, or CLIP and the hotkey picked so far
         std::string sub = "ARENA MATCHMAKING";
@@ -2411,6 +2418,14 @@ void render(Context& c) {
                   (c.key.empty() ? "..." : c.key);
         setText(overlay, QUEUE_PAGE_TITLE, c.titleText, c.setup ? "CLIP" : "PLAY");
         setText(overlay, QUEUE_PAGE_SUBTITLE, c.subtitleText, sub);
+        SYSTEMTIME t;
+        GetLocalTime(&t);
+        bool twelve = clock12;
+        char clock[16];
+        if (twelve) snprintf(clock, sizeof clock, "%d:%02d %s", (t.wHour + 11) % 12 + 1, t.wMinute, t.wHour < 12 ? "AM" : "PM");
+        else snprintf(clock, sizeof clock, "%02d:%02d", t.wHour, t.wMinute);
+        setText(overlay, QUEUE_PAGE_CLOCK, c.clockText, clock);
+        setText(overlay, QUEUE_PAGE_CLOCK_FORMAT_TEXT, c.clockFormatText, twelve ? "12H" : "24H");
     }
     if (overlay && active && c.setup) {
         int mods = c.ctrl | c.shift << 1 | c.alt << 2;
@@ -2539,7 +2554,7 @@ void gate(Context& c, void* cs) {
         else if (b.name == QUEUE_LOBBY) hide = c.page != Page::Queue || matchmaking(c.state);
         else if (b.name == QUEUE_PRIVATE) hide = c.page != Page::Queue || matchmaking(c.state);
         else if (b.name == QUEUE_STATS || b.name == QUEUE_GFX_HIGH || b.name == QUEUE_GFX_LOW || b.name == QUEUE_CLIP ||
-                 b.name == QUEUE_CLIP_KEY) hide = c.page != Page::Queue;
+                 b.name == QUEUE_CLIP_KEY || b.name == QUEUE_CLOCK) hide = c.page != Page::Queue;
         else hide = c.page == Page::Queue;                       // stock page content (another mod's page hides it itself)
         if (hide && !c.masked.count(b.handle)) {
             if (b.reasons & MASK_BIT) {  // someone else's: it's off already, and theirs to turn back on
@@ -2677,6 +2692,7 @@ void unload(void* p, U a, U b, U c) {
             if (kind == 2) {
                 ctx.status.clear(), ctx.timer.clear(), ctx.timerCaption.clear(), ctx.statCaption.clear(), ctx.matches.clear();
                 ctx.gfxCaption.clear(), ctx.titleText.clear(), ctx.subtitleText.clear();
+                ctx.clockText.clear(), ctx.clockFormatText.clear();
                 ctx.modsShown = -1;
                 ctx.searchShown = -1;
                 ctx.gfxShown = -2;
@@ -2762,6 +2778,12 @@ void onEvent(void* gs, U event, U actor, U component, int arg) {
         playSound(SOUND_CLICK);
         WritePrivateProfileStringW(L"stats", L"show", std::to_wstring(mode).c_str(), iniPath().c_str());
         logf("tablet: stats box shows %s", STAT_CAPTIONS[mode]);
+    } else if (component == QUEUE_CLOCK && c.page == Page::Queue) {
+        bool twelve = !clock12;
+        clock12 = twelve;
+        playSound(SOUND_CLICK);
+        WritePrivateProfileStringW(L"clock", L"format", twelve ? L"12" : L"24", iniPath().c_str());
+        logf("tablet: clock shows %s", twelve ? "12-hour" : "24-hour");
     } else if (component == QUEUE_LOBBY && c.page == Page::Queue) {
         logf("tablet: LOBBY pressed (%s)", inMatch ? "in a match" : "not in a match");
         playSound(SOUND_CLICK);
@@ -2958,8 +2980,172 @@ void installTablet() {
     logf("tablet hooks installed (PLAY tab)");
 }
 
+// ---- package read log ([debug] package_reads=1, off by default) ----
+// Every read Echo makes from its package files (48037dc70b0ecab2_<n>), one line each in
+// plugins\EchoLazyTablet.reads.log: package, offset, bytes, ms since start. Matched against the
+// manifest's frames (package, offset), it names every asset Echo loaded and when: which model and
+// texture a lobby object is really drawn from. Hooks KernelBase's ReadFile and ReadFileEx; the
+// handle's file is looked up on each read (handles are reused after a close).
+namespace readlog {
+using ReadFn = BOOL(WINAPI*)(HANDLE, LPVOID, DWORD, LPDWORD, LPOVERLAPPED);
+using ReadExFn = BOOL(WINAPI*)(HANDLE, LPVOID, DWORD, LPOVERLAPPED, LPOVERLAPPED_COMPLETION_ROUTINE);
+ReadFn readOriginal = nullptr;
+ReadExFn readExOriginal = nullptr;
+std::mutex mutex;
+FILE* out = nullptr;
+DWORD started = 0;
+
+int packageOf(HANDLE h) {
+    if (GetFileType(h) != FILE_TYPE_DISK) return -1;
+    wchar_t path[1024];
+    DWORD n = GetFinalPathNameByHandleW(h, path, 1024, FILE_NAME_NORMALIZED);
+    if (!n || n >= 1024) return -1;
+    const wchar_t* name = wcsrchr(path, L'\\');
+    name = name ? name + 1 : path;
+    return wcsncmp(name, L"48037dc70b0ecab2_", 17) == 0 ? _wtoi(name + 17) : -1;
+}
+
+void note(HANDLE h, DWORD size, LPOVERLAPPED ov) {
+    int package = packageOf(h);
+    if (package < 0) return;
+    U offset = 0;
+    if (ov) offset = U(ov->OffsetHigh) << 32 | ov->Offset;
+    else {
+        LARGE_INTEGER zero{}, at{};
+        if (SetFilePointerEx(h, zero, &at, FILE_CURRENT)) offset = U(at.QuadPart);
+    }
+    std::lock_guard<std::mutex> lock(mutex);
+    if (out) {
+        fprintf(out, "%d %llu %lu %lu\n", package, (unsigned long long)offset, size, GetTickCount() - started);
+        fflush(out);
+    }
+}
+
+BOOL WINAPI readDetour(HANDLE h, LPVOID buffer, DWORD size, LPDWORD done, LPOVERLAPPED ov) {
+    note(h, size, ov);
+    return readOriginal(h, buffer, size, done, ov);
+}
+BOOL WINAPI readExDetour(HANDLE h, LPVOID buffer, DWORD size, LPOVERLAPPED ov, LPOVERLAPPED_COMPLETION_ROUTINE done) {
+    note(h, size, ov);
+    return readExOriginal(h, buffer, size, ov, done);
+}
+
+void install() {
+    if (!GetPrivateProfileIntW(L"debug", L"package_reads", 0, iniPath().c_str())) return;
+    started = GetTickCount();
+    out = _wfopen((dir + L"\\EchoLazyTablet.reads.log").c_str(), L"w");
+    if (!out) { logf("reads: can't open EchoLazyTablet.reads.log"); return; }
+    HMODULE base = GetModuleHandleW(L"kernelbase.dll");
+    struct { const char* name; void* detour; void** original; } hooks[] = {
+        {"ReadFile", reinterpret_cast<void*>(readDetour), reinterpret_cast<void**>(&readOriginal)},
+        {"ReadFileEx", reinterpret_cast<void*>(readExDetour), reinterpret_cast<void**>(&readExOriginal)}};
+    for (auto& k : hooks) {
+        void* target = base ? reinterpret_cast<void*>(GetProcAddress(base, k.name)) : nullptr;
+        MH_STATUS s = target ? MH_CreateHook(target, k.detour, k.original) : MH_ERROR_FUNCTION_NOT_FOUND;
+        if (s == MH_OK) s = MH_EnableHook(target);
+        logf("reads: %s %s", k.name, s == MH_OK ? "logged" : MH_StatusToString(s));
+    }
+}
+}  // namespace readlog
+
+// ---- sound output back when Echo closes ([audio] after_echo, off when empty) ----
+// The Oculus runtime makes the headset Windows' default sound output; when Echo exits, the
+// device named in [audio] after_echo (its name in Windows' sound list, e.g. "Speakers (High
+// Definition Audio Device)") is made the default again. Done on the way out (ntdll's
+// RtlExitUserProcess, or TerminateProcess on Echo itself), before Windows tears the process down;
+// a crash skips it. Windows has no public call for this: IPolicyConfig is what its Sound panel uses.
+namespace audioback {
+struct IPolicyConfig : IUnknown {   // only SetDefaultEndpoint is called; the rest hold vtable slots
+    virtual HRESULT STDMETHODCALLTYPE slot0() = 0; virtual HRESULT STDMETHODCALLTYPE slot1() = 0;
+    virtual HRESULT STDMETHODCALLTYPE slot2() = 0; virtual HRESULT STDMETHODCALLTYPE slot3() = 0;
+    virtual HRESULT STDMETHODCALLTYPE slot4() = 0; virtual HRESULT STDMETHODCALLTYPE slot5() = 0;
+    virtual HRESULT STDMETHODCALLTYPE slot6() = 0; virtual HRESULT STDMETHODCALLTYPE slot7() = 0;
+    virtual HRESULT STDMETHODCALLTYPE slot8() = 0; virtual HRESULT STDMETHODCALLTYPE slot9() = 0;
+    virtual HRESULT STDMETHODCALLTYPE SetDefaultEndpoint(LPCWSTR id, ERole role) = 0;
+};
+constexpr CLSID CLSID_PolicyConfig = {0x870af99c, 0x171d, 0x4f9e, {0xaf, 0x0d, 0xe6, 0x3d, 0xf4, 0x0c, 0x2b, 0xc9}};
+constexpr IID IID_PolicyConfig = {0xf8679f50, 0x850a, 0x41cf, {0x9c, 0x72, 0x43, 0x0f, 0x29, 0x02, 0x90, 0xc8}};
+constexpr PROPERTYKEY FRIENDLY_NAME = {{0xa45c254e, 0xdf1c, 0x4efd, {0x80, 0x20, 0x67, 0xd1, 0x46, 0xa8, 0x50, 0xe0}}, 14};
+
+std::wstring wanted;
+std::once_flag once;
+using ExitFn = void(NTAPI*)(LONG);
+using TerminateFn = BOOL(WINAPI*)(HANDLE, UINT);
+ExitFn exitOriginal = nullptr;
+TerminateFn terminateOriginal = nullptr;
+
+void restore() {
+    std::call_once(once, [] {
+        HRESULT init = CoInitializeEx(nullptr, COINIT_MULTITHREADED);   // (another mode already on this thread is fine)
+        IMMDeviceEnumerator* devices = nullptr;
+        IMMDeviceCollection* list = nullptr;
+        std::wstring id;
+        if (SUCCEEDED(CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL, __uuidof(IMMDeviceEnumerator),
+                                       reinterpret_cast<void**>(&devices))) &&
+            SUCCEEDED(devices->EnumAudioEndpoints(eRender, DEVICE_STATE_ACTIVE, &list))) {
+            UINT n = 0;
+            list->GetCount(&n);
+            for (UINT i = 0; i < n && id.empty(); i++) {
+                IMMDevice* d = nullptr;
+                IPropertyStore* props = nullptr;
+                if (FAILED(list->Item(i, &d))) continue;
+                if (SUCCEEDED(d->OpenPropertyStore(STGM_READ, &props))) {
+                    PROPVARIANT name;
+                    PropVariantInit(&name);
+                    LPWSTR devId = nullptr;
+                    if (SUCCEEDED(props->GetValue(FRIENDLY_NAME, &name)) && name.vt == VT_LPWSTR &&
+                        _wcsicmp(name.pwszVal, wanted.c_str()) == 0 && SUCCEEDED(d->GetId(&devId))) {
+                        id = devId;
+                        CoTaskMemFree(devId);
+                    }
+                    PropVariantClear(&name);
+                    props->Release();
+                }
+                d->Release();
+            }
+        }
+        IPolicyConfig* policy = nullptr;
+        if (id.empty()) logf("audio: no sound output called \"%ls\"; left as it is", wanted.c_str());
+        else if (FAILED(CoCreateInstance(CLSID_PolicyConfig, nullptr, CLSCTX_ALL, IID_PolicyConfig, reinterpret_cast<void**>(&policy))))
+            logf("audio: Windows' sound settings can't be reached; left as it is");
+        else {
+            bool ok = true;
+            for (ERole role : {eConsole, eMultimedia, eCommunications}) ok &= SUCCEEDED(policy->SetDefaultEndpoint(id.c_str(), role));
+            logf("audio: %ls %s", wanted.c_str(), ok ? "is the sound output again" : "couldn't be made the sound output");
+            policy->Release();
+        }
+        if (list) list->Release();
+        if (devices) devices->Release();
+        if (SUCCEEDED(init)) CoUninitialize();
+    });
+}
+
+void NTAPI exitDetour(LONG code) {
+    restore();
+    exitOriginal(code);
+}
+BOOL WINAPI terminateDetour(HANDLE process, UINT code) {
+    if (process == GetCurrentProcess() || GetProcessId(process) == GetCurrentProcessId()) restore();
+    return terminateOriginal(process, code);
+}
+
+void install() {
+    wchar_t buffer[256];
+    GetPrivateProfileStringW(L"audio", L"after_echo", L"", buffer, 256, iniPath().c_str());
+    wanted = buffer;
+    if (wanted.empty()) return;
+    void* exitTarget = reinterpret_cast<void*>(GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "RtlExitUserProcess"));
+    void* terminateTarget = reinterpret_cast<void*>(GetProcAddress(GetModuleHandleW(L"kernelbase.dll"), "TerminateProcess"));
+    bool ok = exitTarget && terminateTarget &&
+              MH_CreateHook(exitTarget, reinterpret_cast<void*>(exitDetour), reinterpret_cast<void**>(&exitOriginal)) == MH_OK &&
+              MH_CreateHook(terminateTarget, reinterpret_cast<void*>(terminateDetour), reinterpret_cast<void**>(&terminateOriginal)) == MH_OK &&
+              MH_EnableHook(exitTarget) == MH_OK && MH_EnableHook(terminateTarget) == MH_OK;
+    logf(ok ? "audio: %ls becomes the sound output when Echo closes" : "audio: can't watch for Echo closing (%ls not restored)", wanted.c_str());
+}
+}  // namespace audioback
+
 void initialize() {
-    logf("EchoLazyTablet v3.15 starting (pid %lu)", GetCurrentProcessId());
+    logf("EchoLazyTablet v3.16 starting (pid %lu)", GetCurrentProcessId());
     graphicsStartup();   // first: Echo reads its settings soon after start
     if (liveTextures()) texlod::loadAll();
     if (!verifyExecutable()) { fault = tabletFault = true; logf("EchoLazyTablet disabled"); return; }
@@ -2969,6 +3155,8 @@ void initialize() {
     if (!voiceJoiningMatch) logf("settings: \"Joining Match\" not learnt yet (find one match from the menu or a terminal)");
     MH_STATUS init = MH_Initialize();
     if (init != MH_OK && init != MH_ERROR_ALREADY_INITIALIZED) { logf("MinHook init failed"); fault = tabletFault = true; return; }
+    readlog::install();
+    audioback::install();
     if (!hook(RVA_FIND_MATCH, reinterpret_cast<void*>(findDetour), reinterpret_cast<void**>(&findOriginal)) ||
         !hook(RVA_POST_EVENT, reinterpret_cast<void*>(postEventDetour), reinterpret_cast<void**>(&postEventOriginal))) { fault = tabletFault = true; return; }
     logf("matchmaking hooks installed");

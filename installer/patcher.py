@@ -22,7 +22,7 @@ import echodata as E
 import graphics
 import tablet
 
-VERSION = '3.15'
+VERSION = '3.16'
 EXE_TIMESTAMP = 1683152886
 DATA = Path('_data/5932408047/rad15/win10')
 STOCK_PACKAGES = 3

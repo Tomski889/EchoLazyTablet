@@ -1,4 +1,4 @@
-EchoLazyTablet 3.15 - Echo Arena matchmaking from your hand tablet (Echo VR, EchoVRCE)
+EchoLazyTablet 3.16 - Echo Arena matchmaking from your hand tablet (Echo VR, EchoVRCE)
 
 What it does
   A PLAY tab, first on the hand tablet's tab bar:
@@ -15,6 +15,9 @@ What it does
   * GRAPHICS HIGH / LOW: LOW is "potato" graphics for more FPS (world textures 4 px, players,
     banners and cosmetics 128 px, no shadows, lowest effects, the background effects outside the
     arena and lobby hidden; your render resolution is left alone). Tap one, then restart Echo VR.
+  * A clock in the tablet's title strip, with a 12H / 24H button next to it.
+  * Sound output back when Echo closes: set [audio] after_echo in EchoLazyTablet.ini to your speakers'
+    name, and Windows switches back to them from the headset.
   * Joining or leaving fades the headset to black (after [fade] delay_ms).
   In a public match, FIND MATCH and PRIVATE MATCH wait until the match is over (no leaving your
   team mid-game); private matches and the lobby are fine.

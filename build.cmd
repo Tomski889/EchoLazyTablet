@@ -13,7 +13,7 @@ for %%f in (%MH%\buffer.c %MH%\hook.c %MH%\trampoline.c %MH%\hde\hde64.c) do (
 )
 "%CXX%" -std=c++17 -O2 -shared -static -Wall -o dist\EchoLazyTablet.dll ^
   src\echo_queue.cpp build\buffer.o build\hook.o build\trampoline.o build\hde64.o ^
-  -Wl,--kill-at -luser32 -lkernel32 -lwinhttp
+  -Wl,--kill-at -luser32 -lkernel32 -lwinhttp -lole32
 if errorlevel 1 exit /b 1
 copy /y EchoLazyTablet.ini dist\EchoLazyTablet.ini >nul
 echo built dist\EchoLazyTablet.dll
