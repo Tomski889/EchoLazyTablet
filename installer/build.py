@@ -54,6 +54,28 @@ def icon(path):
     base.save(path, sizes=[(16, 16), (24, 24), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)])
 
 
+def version_info(path):
+    """The exe's Windows version resource (Properties > Details), from patcher.VERSION."""
+    sys.path.insert(0, str(HERE))
+    from patcher import VERSION
+    nums = (tuple(int(n) for n in VERSION.split('.')) + (0, 0, 0, 0))[:4]
+    fields = {'CompanyName': 'EchoLazyTablet', 'FileDescription': 'EchoLazyTablet installer',
+              'FileVersion': VERSION, 'InternalName': 'EchoLazyTabletInstaller',
+              'LegalCopyright': 'EchoLazyTablet author', 'OriginalFilename': 'EchoLazyTabletInstaller.exe',
+              'ProductName': 'EchoLazyTablet', 'ProductVersion': VERSION}
+    strings = ',\n'.join(f'          StringStruct({k!r}, {v!r})' for k, v in fields.items())
+    path.write_text(f"""VSVersionInfo(
+  ffi=FixedFileInfo(filevers={nums}, prodvers={nums}, mask=0x3f, flags=0x0, OS=0x40004,
+                    fileType=0x1, subtype=0x0, date=(0, 0)),
+  kids=[
+    StringFileInfo([StringTable('040904B0', [
+{strings}])]),
+    VarFileInfo([VarStruct('Translation', [1033, 1200])])
+  ]
+)
+""", encoding='utf-8')
+
+
 def main():
     dll = ROOT / 'dist/EchoLazyTablet.dll'
     if not dll.exists():
@@ -77,16 +99,24 @@ def main():
     work = ROOT / 'build/installer'
     work.mkdir(parents=True, exist_ok=True)
     icon(work / 'echoqueue.ico')
-    subprocess.check_call([sys.executable, '-m', 'PyInstaller', '--noconfirm', '--clean', '--onefile', '--windowed',
+    version_info(work / 'version.txt')
+    # A folder, not --onefile: a one-file exe unpacks itself to %TEMP% and runs from there, which
+    # Windows Defender's machine-learning check flags (Program:Win32/Contebrew.A!ml).
+    subprocess.check_call([sys.executable, '-m', 'PyInstaller', '--noconfirm', '--clean', '--onedir', '--windowed',
+                           '--noupx', '--version-file', str(work / 'version.txt'),
                            '--name', 'EchoLazyTabletInstaller', '--icon', str(work / 'echoqueue.ico'),
                            '--paths', str(DEPS), '--paths', str(HERE),
                            '--hidden-import', 'zstandard.backend_c', '--hidden-import', 'texture2ddecoder',
                            '--add-data', f'{PAYLOAD};payload', '--add-data', f'{HERE / "web"};web',
                            '--distpath', str(ROOT / 'dist'), '--workpath', str(work), '--specpath', str(work),
                            '--hidden-import', 'webapp', '--hidden-import', 'webview', str(HERE / 'app.py')])
+    folder = ROOT / 'dist/EchoLazyTabletInstaller'
+    (folder / 'THIRD_PARTY_NOTICES.txt').write_text(text, encoding='utf-8')
+    shutil.copy2(ROOT / 'README.txt', folder / 'README.txt')
     (ROOT / 'dist/THIRD_PARTY_NOTICES.txt').write_text(text, encoding='utf-8')
     shutil.copy2(ROOT / 'README.txt', ROOT / 'dist/README.txt')
-    print('built', ROOT / 'dist/EchoLazyTabletInstaller.exe')
+    archive = shutil.make_archive(str(ROOT / 'dist/EchoLazyTabletInstaller'), 'zip', ROOT / 'dist', folder.name)
+    print('built', folder / 'EchoLazyTabletInstaller.exe', 'and', archive)
 
 
 if __name__ == '__main__':

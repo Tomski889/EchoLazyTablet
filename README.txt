@@ -22,7 +22,8 @@ What it does
   says so in plugins\EchoLazyTablet.log.
 
 Installing (players)
-  Close Echo VR, run EchoLazyTabletInstaller.exe. Its window (shown by Microsoft Edge, part of Windows;
+  Close Echo VR, extract EchoLazyTabletInstaller.zip (right-click, Extract All; it doesn't run from
+  inside the zip), run EchoLazyTabletInstaller.exe in the extracted folder. Its window (shown by Microsoft Edge, part of Windows;
   without Edge it opens in your browser) finds Echo (or use Change...), shows your tab bar as it will
   look, checks your setup, and offers Install / Repair / Uninstall.
   * Echo Mods: applying an Echo Mods profile switches off plugins the profile doesn't name, so the
@@ -60,7 +61,8 @@ What it changes in the game folder
 
 Building
   build.cmd                    dist\EchoLazyTablet.dll (llvm-mingw)
-  python installer\build.py    dist\EchoLazyTabletInstaller.exe (PyInstaller; Python libraries in
+  python installer\build.py    dist\EchoLazyTabletInstaller\ (the installer folder) and
+                               dist\EchoLazyTabletInstaller.zip (PyInstaller; Python libraries in
                                installer\pydeps) and dist\THIRD_PARTY_NOTICES.txt
   python installer\tablet.py --game "<...>" --header src\generated\queue_tab.h
                                regenerates the PLAY page constants (rebuild the DLL after)
