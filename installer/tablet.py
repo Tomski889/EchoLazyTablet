@@ -49,7 +49,10 @@ GFX_HIGH_BUTTON = sym('echo_queue_gfx_high_button_v1')
 GFX_LOW_BUTTON = sym('echo_queue_gfx_low_button_v1')
 CLIP_BUTTON = sym('echo_queue_clip_button_v1')
 CLIP_KEY_BUTTON = sym('echo_queue_clip_key_button_v1')    # opens the CLIP HOTKEY page
-CLOCK_BUTTON = sym('echo_queue_clock_format_button_v1')  # the title strip's 12H / 24H switch
+CLOCK_BUTTON = sym('echo_queue_clock_format_button_v1')  # the title strip's 12H / 24H switch (SFX page)
+PLAY_CLOCK_BUTTON = sym('echo_queue_play_clock_button_v1')  # the PLAY page's clock: tap for 12 / 24 hour
+CLOCK_12_BUTTON = sym('echo_queue_clock_12_button_v1')      # 12H and 24H, beside it
+CLOCK_24_BUTTON = sym('echo_queue_clock_24_button_v1')
 SOUND_TAB_BUTTON = sym('echo_queue_sound_tab_button_v1')  # the SFX tab, next to PLAY
 SOUND_EDIT_BUTTON = sym('echo_queue_sound_edit_button_v1')
 SOUND_PADS = 8                            # the SFX page's buttons, each with its own keybind
@@ -80,18 +83,19 @@ MAX_TABS = 8                              # 8 tabs are 97 px apart; more would o
 SCALE = .3 / 1024                         # touch areas are in metres
 
 CARD = (2, 8, PAGE_W - 2, 520)
-MODE_TILE = (44 + DX, 30, 164 + DX, 150)
-BUTTON = (64 + DX, 198, 620 + DX, 284)          # FIND MATCH / CANCEL SEARCH
-CLIP = (636 + DX, 198, 790 + DX, 284)            # CLIP: presses the player's clip keybind
-CLIP_KEY = (798 + DX, 198, 878 + DX, 284)        # KEY: sets that keybind
+# The PLAY page, on one grid: everything between x 28 and 972, rows 16 px apart.
+MODE_TILE = (28, 22, 148, 142)
+TIME = (436, 22, 636, 142)                      # the clock's card, beside the mode; right of it is free (tap: 12 / 24 hour)
+BUTTON = (28, 166, 632, 250)                    # FIND MATCH / CANCEL SEARCH
+CLIP = (648, 166, 852, 250)                     # CLIP: presses the player's clip keybind
+CLIP_KEY = (868, 166, 972, 250)                 # KEY: sets that keybind
+TILE_W, TILE_GAP, TILE_Y = 176, 16, (270, 506)  # the five boxes along the bottom
 CLOCK_FORMAT = (732, 48, 816, 100)               # 12H / 24H, in the title strip (overlay pixels)
 KEYBOARD = (4, 106, 1020, 658)                   # the CLIP HOTKEY keyboard: the whole screen under the title strip
 SOUND_EDIT = (760, 20, 960, 98)                  # the SFX page's EDIT / DONE
 SOUND_PAD_W, SOUND_PAD_H, SOUND_PAD_GAP = 224, 186, 14
 SOUND_PAD_ORIGIN = (30, 110)                     # the SFX page's top left button
 OVERLAY_H = 768                                  # (nothing past the tablet's edge is drawn: tried, 25 Oct)
-COLUMNS = (118 + DX, 353 + DX, 589 + DX, 824 + DX)
-ROW_CAPTION, ROW_BOX = (318, 350), (358, 468)
 
 ATLAS = 0x79563b60c7895d4e                # the tablet UI atlas, 2048 x 3424 BC7
 CARD_UV = (0.2520, 0.4632, 0.4927, 0.5686)
@@ -110,10 +114,11 @@ TAB_IDLE_UV = (0.6904, 0.3645, 0.7393, 0.3937)
 TAB_SELECTED_UV = (0.6899, 0.3297, 0.7393, 0.3595)
 BGRA_TEMPLATE = 0x84b9a06506af66fe        # stock 128x128 B8G8R8A8 texture (header template)
 DXGI_B8G8R8A8_UNORM, DXGI_B8G8R8A8_UNORM_SRGB = 87, 91
-ICON_W, ICON_H = 512, 256
+ICON_W, ICON_H = 512, 512
 
 TEAL = (.05, .55, .54, 1)
 TEXT, WHITE, BLACK = (.78, .78, .78, 1), (1, 1, 1, 1), (0, 0, 0, 1)
+GREY = (.07, .08, .1, 1)
 DIM, ACCENT = (.5, .54, .6, 1), (.2, .85, .82, 1)
 
 
@@ -190,7 +195,7 @@ def screen_uv(rect):
 def icon_texture(atlas):
     """ICON_W x ICON_H: the PLAY and SFX tabs (idle, selected) and the disc and house glyphs. -> (BGRA bytes, uvs)."""
     from PIL import Image
-    from disc_icon import disc, house, speaker
+    from disc_icon import chart, disc, house, lock, monitor, potato, speaker, speed
     tex = Image.new('RGBA', (ICON_W, ICON_H), (0, 0, 0, 0))
     uvs = {}
     for col, (key, uv, glyph) in enumerate((('tab_idle', TAB_IDLE_UV, disc), ('tab_selected', TAB_SELECTED_UV, disc),
@@ -205,6 +210,11 @@ def icon_texture(atlas):
     uvs['disc'] = (4 / ICON_W, 132 / ICON_H, 124 / ICON_W, 252 / ICON_H)
     tex.alpha_composite(house(120), (132, 132))
     uvs['house'] = (132 / ICON_W, 132 / ICON_H, 252 / ICON_W, 252 / ICON_H)
+    for col, (key, glyph) in enumerate((('lock', lock), ('chart', chart), ('speed', speed), ('monitor', monitor))):
+        tex.alpha_composite(glyph(120), (col * 128 + 4, 260))
+        uvs[key] = ((col * 128 + 4) / ICON_W, 260 / ICON_H, (col * 128 + 124) / ICON_W, 380 / ICON_H)
+    tex.alpha_composite(potato(120), (4, 388))
+    uvs['potato'] = (4 / ICON_W, 388 / ICON_H, 124 / ICON_W, 508 / ICON_H)
     r, g, b, a = tex.split()
     return Image.merge('RGBA', (b, g, r, a)).tobytes(), uvs
 
@@ -389,14 +399,31 @@ def build(m):
     e = {}
     e['card'] = sprite('echo_queue_card_v1', CARD, CARD_UV, WHITE)
     e['card_active'] = sprite('echo_queue_card_active_v1', CARD, CARD_ACTIVE_UV, WHITE, hidden=True)
+    # Top: the mode (disc tile, ECHO ARENA, what's going on), then the time and the status on the right.
     tile = sprite('echo_queue_mode_tile_v1', MODE_TILE, TILE_UV, TEAL)
     tw = MODE_TILE[2] - MODE_TILE[0]
     sprite('echo_queue_mode_icon_v1', (16, 16, tw - 16, tw - 16), icon_uvs['disc'], WHITE, parent=tile, texture=ICON_TEXTURE)
-    text('echo_queue_title_text_v1', 'ECHO ARENA', (190 + DX, 26, 620 + DX, 80), 52, WHITE, align=0)
-    text('echo_queue_mode_text_v1', 'PUBLIC MATCH', (192 + DX, 80, 620 + DX, 110), 24, ACCENT, align=0)
-    e['status'] = text('echo_queue_status_v1', 'TAP FIND MATCH TO QUEUE', (192 + DX, 112, 640 + DX, 146), 24, TEXT, align=0, capacity=96)
-    e['timer'] = text('echo_queue_timer_v1', 'READY', (620 + DX, 30, 896 + DX, 112), 64, WHITE, align=1, capacity=16)
-    e['timer_caption'] = text('echo_queue_timer_caption_v1', 'STATUS', (620 + DX, 112, 896 + DX, 142), 20, ACCENT, align=1, capacity=24)
+    text('echo_queue_title_text_v1', 'ECHO ARENA', (168, 24, 580, 76), 50, WHITE, align=0)
+    text('echo_queue_mode_text_v1', 'PUBLIC MATCH', (170, 76, 580, 104), 24, ACCENT, align=0)
+    e['status'] = text('echo_queue_status_v1', 'TAP FIND MATCH TO QUEUE', (170, 106, 426, 140), 22, TEXT, align=0, capacity=96)
+    sprite('echo_queue_play_clock_base_v1', TIME, CARD_UV, WHITE)
+    clock_box = sprite('echo_queue_play_clock_box_v1', TIME, CARD_ACTIVE_UV, WHITE)
+    sprite('echo_queue_play_clock_fill_v1', (6, 6, TIME[2] - TIME[0] - 6, TIME[3] - TIME[1] - 6), ROW_FILL_UV, (*FIND_FILL[:3], .55),
+           parent=clock_box, texture=ROW_ATLAS)
+    # 12-hour: the time with AM / PM centred under it; 24-hour: the time alone, centred in the card.
+    e['play_clock'] = text('echo_queue_play_clock_v1', '00:00', (TIME[0], TIME[1] + 8, TIME[2], TIME[1] + 78), 56, WHITE, capacity=16)
+    e['play_clock_ampm'] = text('echo_queue_play_clock_ampm_v1', 'AM', (TIME[0], TIME[1] + 74, TIME[2], TIME[3] - 8), 30, WHITE, capacity=8)
+    e['play_clock_24'] = text('echo_queue_play_clock_24_v1', '00:00', TIME, 56, WHITE, hidden=True, capacity=16)
+    # 12H on top and 24H under it, beside the card; the plugin lights the one in use.
+    clock_rects = {}
+    for key, label, y0, y1 in (('clock_12', '12H', TIME[1], TIME[1] + 56), ('clock_24', '24H', TIME[3] - 56, TIME[3])):
+        rect = (TIME[2] + 12, y0, TIME[2] + 96, y1)
+        w, h = rect[2] - rect[0], rect[3] - rect[1]
+        sprite(f'echo_queue_{key}_base_v1', rect, CARD_UV, WHITE)
+        e[key] = sprite(f'echo_queue_{key}_box_v1', rect, CARD_ACTIVE_UV, WHITE, hidden=True)
+        sprite(f'echo_queue_{key}_fill_v1', (4, 4, w - 4, h - 4), ROW_FILL_UV, FIND_BORDER, parent=e[key], texture=ROW_ATLAS)
+        text(f'echo_queue_{key}_text_v1', label, rect, 26, WHITE)
+        clock_rects[key] = rect
 
     def lobby_row(name, rect, fill, border, title, hidden=False, size=46):
         x0, y0, x1, y1 = rect
@@ -417,39 +444,51 @@ def build(m):
     e['clip'], e['clip_text'] = lobby_row('echo_queue_clip_row_v1', CLIP, CLIP_FILL, CLIP_BORDER, 'CLIP')
     lobby_row('echo_queue_clip_key_row_v1', CLIP_KEY, CLIP_FILL, CLIP_BORDER, 'KEY', size=30)
 
-    def action_box(key, cx, caption, label, icon=None, busy=True, capacity=0):
-        e[key + '_caption'] = text(f'echo_queue_caption_{cx}_v1', caption, (cx - 115, ROW_CAPTION[0], cx + 115, ROW_CAPTION[1]), 22, WHITE, capacity=capacity)
-        rect = (cx - 96, ROW_BOX[0] + 8, cx + 96, ROW_BOX[1] + 8)
-        w, h = rect[2] - rect[0], rect[3] - rect[1]
-        sprite(f'echo_queue_{key}_base_v1', rect, CARD_UV, WHITE)
-        e[key] = sprite(f'echo_queue_{key}_box_v1', rect, CARD_ACTIVE_UV, WHITE)
-        sprite(f'echo_queue_{key}_fill_v1', (6, 6, w - 6, h - 6), ROW_FILL_UV, (*FIND_FILL[:3], .55), parent=e[key], texture=ROW_ATLAS)
-        label_rect = rect
-        if icon:
-            side = 64
-            sprite(f'echo_queue_{key}_icon_v1', (30, (h - side) / 2, 30 + side, (h + side) / 2), icon_uvs[icon], WHITE,
-                   parent=e[key], texture=ICON_TEXTURE)
-            label_rect = (rect[0] + 30 + side, rect[1], rect[2] - 10, rect[3])
-        e[key + '_text'] = text(f'echo_queue_{key}_text_v1', label, label_rect, 40, WHITE, capacity=capacity)
+    # Bottom: five boxes the same size, each with its name at the top, an icon, and its value or buttons.
+    def tile_rect(n):
+        x0 = 28 + n * (TILE_W + TILE_GAP)
+        return x0, TILE_Y[0], x0 + TILE_W, TILE_Y[1]
+
+    def tile(key, n, caption, label, icon, busy=True, lit=True, capacity=0, card_h=None):
+        """card_h: the card stops that far down (what's under it, e.g. GRAPHICS' buttons, stands on its own)."""
+        rect = tile_rect(n)
+        x0, y0, x1, y1 = rect
+        w, h = x1 - x0, card_h or y1 - y0
+        card = (x0, y0, x1, y0 + h)
+        sprite(f'echo_queue_{key}_base_v1', card, CARD_UV, WHITE)
+        if lit:   # (hidden by the plugin while it can't be used)
+            e[key] = sprite(f'echo_queue_{key}_box_v1', card, CARD_ACTIVE_UV, WHITE)
+            sprite(f'echo_queue_{key}_fill_v1', (6, 6, w - 6, h - 6), ROW_FILL_UV, (*FIND_FILL[:3], .55), parent=e[key], texture=ROW_ATLAS)
+        side = 72
+        icon_rect = (x0 + (w - side) / 2, y0 + 54, x0 + (w + side) / 2, y0 + 54 + side)
+        e[key + '_icon'] = sprite(f'echo_queue_{key}_icon_v1', icon_rect, icon_uvs[icon], WHITE, texture=ICON_TEXTURE)
+        e[key + '_caption'] = text(f'echo_queue_{key}_caption_v1', caption, (x0 + 4, y0 + 12, x1 - 4, y0 + 44), 18, ACCENT, capacity=24)
+        value = (x0 + 6, y0 + 144, x1 - 6, y1 - 12)
+        if label:
+            e[key + '_text'] = text(f'echo_queue_{key}_text_v1', label, value, 34, WHITE, capacity=capacity)
         if busy:
-            e[key + '_busy'] = text(f'echo_queue_{key}_busy_v1', 'BUSY', rect, 40, DIM, hidden=True)
-        return rect
+            e[key + '_busy'] = text(f'echo_queue_{key}_busy_v1', 'BUSY', value, 34, DIM, hidden=True)
+        return rect, value, icon_rect
 
-    private_rect = action_box('private', COLUMNS[0], 'PRIVATE MATCH', 'CREATE')
-    lobby_rect = action_box('lobby', COLUMNS[1], 'LOBBY', 'GO', icon='house')
-    stats_rect = action_box('stats', COLUMNS[2], 'HOURS TODAY', '0 MINS', busy=False, capacity=16)
+    private_rect, _, _ = tile('private', 0, 'PRIVATE MATCH', 'CREATE', 'lock')
+    lobby_rect, _, _ = tile('lobby', 1, 'LOBBY', 'GO', 'house')
+    stats_rect, _, _ = tile('stats', 2, 'HOURS TODAY', '0 MINS', 'chart', busy=False, capacity=16)
+    tile('throw', 3, 'LAST THROW', '-- M/S', 'speed', busy=False, capacity=16)
 
-    # GRAPHICS: HIGH and LOW side by side in the last column; the plugin lights the chosen one.
-    cx = COLUMNS[3]
-    e['gfx_caption'] = text(f'echo_queue_caption_{cx}_v1', 'GRAPHICS', (cx - 115, ROW_CAPTION[0], cx + 115, ROW_CAPTION[1]), 22, WHITE, capacity=24)
+    # GRAPHICS: its card stops above HIGH and LOW, which sit side by side under it, as wide as the box;
+    # the plugin lights the chosen one.
+    gfx_box, _, icon_rect = tile('gfx', 4, 'GRAPHICS', None, 'monitor', busy=False, card_h=136)
+    vx0, vy0, vx1, vy1 = gfx_box[0], gfx_box[1] + 146, gfx_box[2], gfx_box[3]
+    e['gfx_icon_low'] = sprite('echo_queue_gfx_icon_low_v1', icon_rect, icon_uvs['potato'], WHITE, hidden=True, texture=ICON_TEXTURE)   # LOW: a potato on the screen
     gfx_rects = {}
-    for key, label, x0, x1 in (('gfx_high', 'HIGH', cx - 96, cx - 4), ('gfx_low', 'LOW', cx + 4, cx + 96)):
-        rect = (x0, ROW_BOX[0] + 8, x1, ROW_BOX[1] + 8)
-        w, h = x1 - x0, rect[3] - rect[1]
+    mid = (vx0 + vx1) / 2
+    for key, label, x0, x1 in (('gfx_high', 'HIGH', vx0, mid - 3), ('gfx_low', 'LOW', mid + 3, vx1)):
+        rect = (x0, vy0, x1, vy1)
+        w, h = x1 - x0, vy1 - vy0
         sprite(f'echo_queue_{key}_base_v1', rect, CARD_UV, WHITE)
         e[key] = sprite(f'echo_queue_{key}_box_v1', rect, CARD_ACTIVE_UV, WHITE, hidden=True)
-        sprite(f'echo_queue_{key}_fill_v1', (6, 6, w - 6, h - 6), ROW_FILL_UV, (*FIND_FILL[:3], .55), parent=e[key], texture=ROW_ATLAS)
-        e[key + '_text'] = text(f'echo_queue_{key}_text_v1', label, rect, 34, WHITE)
+        sprite(f'echo_queue_{key}_fill_v1', (4, 4, w - 4, h - 4), ROW_FILL_UV, FIND_BORDER, parent=e[key], texture=ROW_ATLAS)
+        e[key + '_text'] = text(f'echo_queue_{key}_text_v1', label, rect, 26, WHITE)
         gfx_rects[key] = rect
 
     # The CLIP HOTKEY page: shown instead of the PLAY page (first time, or from KEY), a keyboard over
@@ -514,7 +553,16 @@ def build(m):
     header = page.append(panel_template, 'echo_queue_header_background_v1', (60, 40, 210, 108), hidden=True)
     colour(page, header, WHITE)
     title = text('echo_queue_title_v1', 'PLAY', (76, 40, 210, 108), 44, BLACK, align=0, hidden=True, capacity=64)
-    subtitle = text('echo_queue_subtitle_v1', 'ARENA MATCHMAKING', (236, 40, 800, 108), 30, DIM, align=0, hidden=True, capacity=64)
+    # The subtitle on a grey box, long enough for ARENA MATCHMAKING; the wide one while the keyboard's
+    # up (its prompts are longer, and the clock is hidden then).
+    subtitle_box = page.append(panel_template, 'echo_queue_subtitle_box_v1', (226, 48, 548, 100), hidden=True)
+    colour(page, subtitle_box, GREY)
+    subtitle_box_wide = page.append(panel_template, 'echo_queue_subtitle_box_wide_v1', (226, 48, 816, 100), hidden=True)
+    colour(page, subtitle_box_wide, GREY)
+    # PLAY's status (READY, or the queue timer while searching) in the strip's top right corner.
+    e['timer_caption'] = text('echo_queue_timer_caption_v1', 'STATUS', (700, 48, 852, 100), 18, ACCENT, align=1, hidden=True, capacity=24)
+    e['timer'] = text('echo_queue_timer_v1', 'READY', (864, 40, 990, 108), 32, WHITE, align=0, hidden=True, capacity=16)
+    subtitle = text('echo_queue_subtitle_v1', 'ARENA MATCHMAKING', (242, 40, 810, 108), 30, WHITE, align=0, hidden=True, capacity=64)
     # The clock at the strip's right end, and the 12H / 24H switch next to it (it names the format shown).
     clock = text('echo_queue_clock_v1', '00:00', (560, 40, 722, 108), 36, WHITE, align=1, hidden=True, capacity=16)
     clock_format = sprite('echo_queue_clock_format_v1', CLOCK_FORMAT, CARD_ACTIVE_UV, WHITE, hidden=True)
@@ -573,6 +621,9 @@ def build(m):
     add_button(GFX_HIGH_BUTTON, gfx_rects['gfx_high'])
     add_button(GFX_LOW_BUTTON, gfx_rects['gfx_low'])
     add_button(CLOCK_BUTTON, CLOCK_FORMAT, on_page=False)
+    add_button(PLAY_CLOCK_BUTTON, TIME)
+    add_button(CLOCK_12_BUTTON, clock_rects['clock_12'])
+    add_button(CLOCK_24_BUTTON, clock_rects['clock_24'])
     add_button(SOUND_TAB_BUTTON, sound_tab_rect, on_page=False)
     add_button(SOUND_EDIT_BUTTON, SOUND_EDIT)
     for i, rect in enumerate(sound_rects):
@@ -584,7 +635,8 @@ def build(m):
     icon_cpu, icon_gpu = texture_pair(m, ICON_W, ICON_H, icon_pixels)
     resources = [(CV, ROOT_CANVAS, root.serialize()), (CV, NAV_CANVAS, nav.serialize()), (CV, OVERLAY, page.serialize()),
                  (BUTTONS, LEVEL, buttons.serialize()), (TEX, ICON_TEXTURE, icon_cpu), (TEX_GPU, ICON_TEXTURE, icon_gpu)]
-    e.update(page=page_group, cover=cover, header=header, title=title, subtitle=subtitle, clock=clock, clock_format=clock_format,
+    e.update(page=page_group, cover=cover, header=header, title=title, subtitle=subtitle, subtitle_box=subtitle_box,
+             subtitle_box_wide=subtitle_box_wide, clock=clock, clock_format=clock_format,
              clock_format_text=clock_format_text, tab_icon=tab_icon, tab_selected=tab_selected,
              sound_tab_icon=sound_tab_icon, sound_tab_selected=sound_tab_selected)
 
@@ -701,7 +753,8 @@ def page_header(built):
             f'constexpr uint64_t QUEUE_TAB=0x{TAB_BUTTON:016x}, QUEUE_START=0x{START_BUTTON:016x}, '
             f'QUEUE_CANCEL=0x{CANCEL_BUTTON:016x}, QUEUE_LOBBY=0x{LOBBY_BUTTON:016x}, QUEUE_PRIVATE=0x{PRIVATE_BUTTON:016x}, '
             f'QUEUE_STATS=0x{STATS_BUTTON:016x}, QUEUE_GFX_HIGH=0x{GFX_HIGH_BUTTON:016x}, QUEUE_GFX_LOW=0x{GFX_LOW_BUTTON:016x}, QUEUE_CLIP=0x{CLIP_BUTTON:016x}, QUEUE_CLIP_KEY=0x{CLIP_KEY_BUTTON:016x}, QUEUE_CLOCK=0x{CLOCK_BUTTON:016x}, '
-            f'QUEUE_SOUND_TAB=0x{SOUND_TAB_BUTTON:016x}, QUEUE_SOUND_EDIT=0x{SOUND_EDIT_BUTTON:016x};\n'
+            f'QUEUE_SOUND_TAB=0x{SOUND_TAB_BUTTON:016x}, QUEUE_SOUND_EDIT=0x{SOUND_EDIT_BUTTON:016x}, QUEUE_PLAY_CLOCK=0x{PLAY_CLOCK_BUTTON:016x}, '
+            f'QUEUE_CLOCK_12=0x{CLOCK_12_BUTTON:016x}, QUEUE_CLOCK_24=0x{CLOCK_24_BUTTON:016x};\n'
             'constexpr uint64_t QUEUE_SOUND_BUTTONS[] = {' + ', '.join(f'0x{sound_button(i):016x}' for i in range(SOUND_PADS)) + '};\n'
             'constexpr unsigned QUEUE_SOUND_TEXTS[] = {' + ', '.join(str(e[f'sound_text_{i}']) for i in range(SOUND_PADS)) + '};\n'
             'constexpr unsigned QUEUE_SOUND_CAPTIONS[] = {' + ', '.join(str(e[f'sound_caption_{i}']) for i in range(SOUND_PADS)) + '};\n'

@@ -1544,6 +1544,23 @@ int jsonBool(const std::string& body, const char* key) {
 }
 
 // The string value of "key" in a flat JSON body, or "" (enough for game_status / match_type).
+// The number value of "key" in a JSON body (its first one), or -1 when it isn't there.
+double jsonNumber(const std::string& body, const char* key) {
+    size_t i = body.find("\"" + std::string(key) + "\"");
+    if (i == std::string::npos) return -1;
+    i = body.find_first_not_of(" \t\r\n:", i + strlen(key) + 2);
+    if (i == std::string::npos) return -1;
+    char* end = nullptr;
+    double v = strtod(body.c_str() + i, &end);
+    return end == body.c_str() + i ? -1 : v;
+}
+
+// LAST THROW: the speed of the player's last throw (m/s, the API's last_throw total_speed), -1 none yet
+// this run. Echo's API only answers in a match, and each ask costs it frame time, so it's only asked
+// about once a second while the PLAY page is up there; the last one seen stays on the page.
+std::atomic<double> lastThrow{-1};
+std::atomic<U> throwWantedAt{0};
+
 std::string jsonString(const std::string& body, const char* key) {
     size_t i = body.find("\"" + std::string(key) + "\"");
     if (i == std::string::npos) return "";
@@ -1746,7 +1763,7 @@ DWORD WINAPI playersWatch(LPVOID) {
 // sends the account's ID and display name from the saved profile (xplatformid, displayname)
 // and gets back blocked or not. The answer is kept in EchoLazyTablet.ini ([access] blocked) for
 // when the service can't be reached; with no answer ever, EchoLazyTablet stays on.
-constexpr const char* ECHOQUEUE_VERSION = "3.17";
+constexpr const char* ECHOQUEUE_VERSION = "3.18";
 constexpr const wchar_t* ACCESS_HOST = L"echoqueue.dokuyegar.workers.dev";  // the deployed Worker (server/worker.js)
 constexpr U ACCESS_EVERY_MS = 15 * 60 * 1000;
 
@@ -1858,6 +1875,14 @@ DWORD WINAPI matchWatch(LPVOID) {
         lastState = netState;
         if (netState != NETGAME_IN_GAME) { counted = inMatch = false; matchPublic = -1; inGameSince = 0; continue; }
         if (!inGameSince) inGameSince = now;
+        static U throwAskedAt = 0;
+        if (now - throwWantedAt < 1500 && now - throwAskedAt >= 1000) {
+            throwAskedAt = now;
+            if (apiSession(body) == 200) {
+                double v = jsonNumber(body, "total_speed");
+                if (v > 0 && v != lastThrow) { lastThrow = v; logf("last throw: %.1f m/s", v); }
+            }
+        }
         if (counted || now - inGameSince > API_ASK_MS) continue;
         DWORD http = apiSession(body);
         if (!http) {  // also normal in the social lobby, so only worth a word if it never answered
@@ -1974,7 +1999,7 @@ struct Context {
     std::array<View, KINDS> views{};
     std::set<unsigned> masked;
     U gateKey = ~0ull;          // button masks last applied for (page, searching, ready, buttons)
-    std::string status, timer, timerCaption, statCaption, matches, gfxCaption;  // what the page's dynamic text shows
+    std::string status, timer, timerCaption, statCaption, matches, gfxCaption, playClockText, playAmpmText, playClock24Text, throwText;  // what the page's dynamic text shows
     int searchShown = -1;       // the searching layout (teal card, timer, CANCEL SEARCH) shown
     int gfxShown = -2;          // the graphics choice lit (GFX_*)
     bool setup = false;         // the hotkey keyboard is up instead of the PLAY or SFX page
@@ -2024,7 +2049,7 @@ bool onOurPage(const Context& c) { return c.page == Page::Queue || c.page == Pag
 bool isOurs(U n) {
     if (keyFor(n) || n == QUEUE_CLIP_KEY || soundPad(n) >= 0 || n == QUEUE_SOUND_TAB || n == QUEUE_SOUND_EDIT) return true;
     return n == QUEUE_TAB || n == QUEUE_START || n == QUEUE_CANCEL || n == QUEUE_LOBBY || n == QUEUE_PRIVATE || n == QUEUE_STATS ||
-           n == QUEUE_GFX_HIGH || n == QUEUE_GFX_LOW || n == QUEUE_CLIP || n == QUEUE_CLOCK;
+           n == QUEUE_GFX_HIGH || n == QUEUE_GFX_LOW || n == QUEUE_CLIP || n == QUEUE_CLOCK || n == QUEUE_PLAY_CLOCK || n == QUEUE_CLOCK_12 || n == QUEUE_CLOCK_24;
 }
 
 void failTablet(const char* why) { tabletFault = true; logf("TABLET FAULT: %s -- PLAY tab off for this session", why); }
@@ -2463,11 +2488,15 @@ void render(Context& c) {
         for (unsigned i : {QUEUE_PAGE_COVER, QUEUE_PAGE_HEADER, QUEUE_PAGE_TITLE, QUEUE_PAGE_SUBTITLE})
             ensure(overlay, i, active);
     if (overlay) {   // the PLAY or SFX page or, in its place, the hotkey keyboard
+        ensure(overlay, QUEUE_PAGE_SUBTITLE_BOX, active && !c.setup);
+        ensure(overlay, QUEUE_PAGE_SUBTITLE_BOX_WIDE, active && c.setup);
+        for (unsigned i : {QUEUE_PAGE_TIMER, QUEUE_PAGE_TIMER_CAPTION})   // PLAY's status, in the strip
+            ensure(overlay, i, play && !c.setup);
         ensure(overlay, QUEUE_PAGE_PAGE, play && !c.setup);
         ensure(overlay, QUEUE_PAGE_SOUND_PAGE, sounds && !c.setup);
         ensure(overlay, QUEUE_PAGE_KEYBOARD, active && c.setup);
         for (unsigned i : {QUEUE_PAGE_CLOCK, QUEUE_PAGE_CLOCK_FORMAT, QUEUE_PAGE_CLOCK_FORMAT_TEXT})  // (the hotkey needs the room)
-            ensure(overlay, i, active && !c.setup);
+            ensure(overlay, i, sounds && !c.setup);
     }
     if (overlay && active) {   // the title strip: PLAY or SFX, or what's being set and the hotkey picked so far
         std::string sub = sounds ? "SOUNDBOARD" : "ARENA MATCHMAKING";
@@ -2493,6 +2522,20 @@ void render(Context& c) {
         if (twelve) snprintf(clock, sizeof clock, "%d:%02d %s", (t.wHour + 11) % 12 + 1, t.wMinute, t.wHour < 12 ? "AM" : "PM");
         else snprintf(clock, sizeof clock, "%02d:%02d", t.wHour, t.wMinute);
         setText(overlay, QUEUE_PAGE_CLOCK, c.clockText, clock);
+        if (play) {   // PLAY's own clock: 12-hour, the time and AM / PM beside it; 24-hour, the time centred
+            std::string full = clock;
+            size_t space = full.find(' ');
+            ensure(overlay, QUEUE_PAGE_PLAY_CLOCK, twelve);
+            ensure(overlay, QUEUE_PAGE_PLAY_CLOCK_AMPM, twelve);
+            ensure(overlay, QUEUE_PAGE_PLAY_CLOCK_24, !twelve);
+            if (twelve) {
+                setText(overlay, QUEUE_PAGE_PLAY_CLOCK, c.playClockText, full.substr(0, space));
+                setText(overlay, QUEUE_PAGE_PLAY_CLOCK_AMPM, c.playAmpmText, space == std::string::npos ? "" : full.substr(space + 1));
+            } else
+                setText(overlay, QUEUE_PAGE_PLAY_CLOCK_24, c.playClock24Text, full);
+            ensure(overlay, QUEUE_PAGE_CLOCK_12, twelve);   // 12H / 24H beside it: the one in use lit
+            ensure(overlay, QUEUE_PAGE_CLOCK_24, !twelve);
+        }
         setText(overlay, QUEUE_PAGE_CLOCK_FORMAT_TEXT, c.clockFormatText, twelve ? "12H" : "24H");
     }
     if (overlay && active && c.setup) {
@@ -2578,15 +2621,22 @@ void render(Context& c) {
                 mode == STAT_TODAY ? playedText(secondsToday)
                 : mode == STAT_OVERALL ? (overall < 0 ? "--" : std::to_string(overall))
                 : players < 0 ? "..." : std::to_string(players));
+        throwWantedAt = now;
+        double speed = lastThrow;
+        char throwText[16] = "-- M/S";
+        if (speed > 0) snprintf(throwText, sizeof throwText, "%.1f M/S", speed);
+        setText(page, QUEUE_PAGE_THROW_TEXT, c.throwText, throwText);
         // GRAPHICS: the chosen one lit; the caption says when it takes a restart.
         int chosen = gfxChosen;
         if (c.gfxShown != chosen) {
             ensure(page, QUEUE_PAGE_GFX_HIGH, chosen == GFX_HIGH);
             ensure(page, QUEUE_PAGE_GFX_LOW, chosen == GFX_LOW);
+            ensure(page, QUEUE_PAGE_GFX_ICON, chosen != GFX_LOW);
+            ensure(page, QUEUE_PAGE_GFX_ICON_LOW, chosen == GFX_LOW);
             c.gfxShown = chosen;
         }
         setText(page, QUEUE_PAGE_GFX_CAPTION, c.gfxCaption,
-                chosen == GFX_UNKNOWN ? "GRAPHICS - NOT SET UP" : !texlod::deviceHooked && chosen != gfxLoaded ? "RESTART ECHO" : "GRAPHICS");
+                chosen == GFX_UNKNOWN ? "NOT SET UP" : !texlod::deviceHooked && chosen != gfxLoaded ? "RESTART ECHO" : "GRAPHICS");
     }
 }
 
@@ -2627,7 +2677,8 @@ void gate(Context& c, void* cs) {
         else if (b.name == QUEUE_TAB || b.name == QUEUE_SOUND_TAB) hide = !ready;
         else if (keyFor(b.name)) hide = !onOurPage(c) || !c.setup;
         else if (c.setup && onOurPage(c)) hide = true;   // the page's own buttons, under the setup page
-        else if (b.name == QUEUE_CLOCK) hide = !onOurPage(c);
+        else if (b.name == QUEUE_CLOCK) hide = c.page != Page::Sounds;
+        else if (b.name == QUEUE_PLAY_CLOCK || b.name == QUEUE_CLOCK_12 || b.name == QUEUE_CLOCK_24) hide = c.page != Page::Queue;
         else if (soundPad(b.name) >= 0 || b.name == QUEUE_SOUND_EDIT) hide = c.page != Page::Sounds;
         else if (b.name == QUEUE_START) hide = c.page != Page::Queue || matchmaking(c.state);
         else if (b.name == QUEUE_CANCEL) hide = c.page != Page::Queue || !matchmaking(c.state);
@@ -2771,7 +2822,8 @@ void unload(void* p, U a, U b, U c) {
             if (kind == 1) ctx.navState = -1;
             if (kind == 2) {
                 ctx.status.clear(), ctx.timer.clear(), ctx.timerCaption.clear(), ctx.statCaption.clear(), ctx.matches.clear();
-                ctx.gfxCaption.clear(), ctx.titleText.clear(), ctx.subtitleText.clear();
+                ctx.gfxCaption.clear(), ctx.titleText.clear(), ctx.subtitleText.clear(), ctx.playClockText.clear(), ctx.playAmpmText.clear(), ctx.throwText.clear();
+                ctx.playClock24Text.clear();
                 ctx.clockText.clear(), ctx.clockFormatText.clear(), ctx.keyOtherText.clear();
                 ctx.keyCtrlText.clear(), ctx.keyShiftText.clear(), ctx.keyAltText.clear();
                 ctx.soundStatus.clear(), ctx.soundEditText.clear();
@@ -2915,8 +2967,9 @@ void onEvent(void* gs, U event, U actor, U component, int arg) {
         playSound(SOUND_CLICK);
         WritePrivateProfileStringW(L"stats", L"show", std::to_wstring(mode).c_str(), iniPath().c_str());
         logf("tablet: stats box shows %s", STAT_CAPTIONS[mode]);
-    } else if (component == QUEUE_CLOCK && onOurPage(c)) {
-        bool twelve = !clock12;
+    } else if ((component == QUEUE_CLOCK && c.page == Page::Sounds) ||
+               ((component == QUEUE_PLAY_CLOCK || component == QUEUE_CLOCK_12 || component == QUEUE_CLOCK_24) && c.page == Page::Queue)) {
+        bool twelve = component == QUEUE_CLOCK_12 ? true : component == QUEUE_CLOCK_24 ? false : !clock12;
         clock12 = twelve;
         playSound(SOUND_CLICK);
         WritePrivateProfileStringW(L"clock", L"format", twelve ? L"12" : L"24", iniPath().c_str());
@@ -3308,7 +3361,7 @@ void install() {
 }  // namespace audioback
 
 void initialize() {
-    logf("EchoLazyTablet v3.17 starting (pid %lu)", GetCurrentProcessId());
+    logf("EchoLazyTablet v3.18 starting (pid %lu)", GetCurrentProcessId());
     graphicsStartup();   // first: Echo reads its settings soon after start
     if (liveTextures()) texlod::loadAll();
     if (!verifyExecutable()) { fault = tabletFault = true; logf("EchoLazyTablet disabled"); return; }

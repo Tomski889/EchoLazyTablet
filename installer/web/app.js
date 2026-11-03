@@ -257,14 +257,14 @@ function renderPage(kind, tab, p) {
     const row = el('div', 'findrow');
     row.append(findButton(), el('span', 'clip', 'CLIP'), el('span', 'clip key', 'KEY'));
     const boxes = el('div', 'boxes');
-    for (const [label, value] of [['PRIVATE MATCH', 'CREATE'], ['LOBBY', '⌂ GO'], ['MATCHES OVERALL', p && p.matches != null ? String(p.matches) : '—']]) {
+    for (const [label, value] of [['PRIVATE MATCH', 'CREATE'], ['LOBBY', '⌂ GO'], ['MATCHES OVERALL', p && p.matches != null ? String(p.matches) : '—'], ['LAST THROW', '— M/S']]) {
       const b = el('div'); b.append(el('small', '', label), el('span', '', value)); boxes.append(b);
     }
     boxes.append(graphicsBox());
     page.replaceChildren(card, row, boxes);
   } else if (kind === 'sounds') {
     heading('SFX', 'SOUNDBOARD');
-    const boxes = el('div', 'boxes');
+    const boxes = el('div', 'boxes four');
     for (let i = 1; i <= 8; i++) {
       const b = el('div'); b.append(el('small', '', 'SOUND ' + i), el('span', '', 'TAP TO SET')); boxes.append(b);
     }

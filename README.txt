@@ -1,4 +1,4 @@
-EchoLazyTablet 3.17 - Echo Arena matchmaking from your hand tablet (Echo VR, EchoVRCE)
+EchoLazyTablet 3.18 - Echo Arena matchmaking from your hand tablet (Echo VR, EchoVRCE)
 
 What it does
   A PLAY tab, second on the hand tablet's tab bar (after SFX, below):
@@ -12,10 +12,13 @@ What it does
     page (KEY, next to CLIP, opens it again; NO CLIP APP if you don't use one); it's kept as
     [clip] keys in EchoLazyTablet.ini.
   * A stats box (tap to switch): hours played today, matches overall, players online.
-  * GRAPHICS HIGH / LOW: LOW is "potato" graphics for more FPS (world textures 4 px, players,
+  * LAST THROW: the speed of your last disc throw (m/s), read from Echo's API in a match (needs
+    API access on in Echo's settings); -- until you've thrown.
+  * GRAPHICS HIGH / LOW (a potato on its screen icon while LOW is on): LOW is "potato" graphics for more FPS (world textures 4 px, players,
     banners and cosmetics 128 px, no shadows, lowest effects, the background effects outside the
     arena and lobby hidden; your render resolution is left alone). Tap one, then restart Echo VR.
-  * A clock in the tablet's title strip, with a 12H / 24H button next to it.
+  * A clock on the PLAY page, with 12H and 24H buttons beside it (on the SFX page it's in the
+    title strip). PLAY's status (READY, or the queue timer) is in the strip's top right corner.
   * Sound output back when Echo closes: set [audio] after_echo in EchoLazyTablet.ini to your speakers'
     name, and Windows switches back to them from the headset.
   * Joining or leaving fades the headset to black (after [fade] delay_ms).

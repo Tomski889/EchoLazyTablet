@@ -67,6 +67,86 @@ def house(size):
     return img.resize((size, size), Image.LANCZOS)
 
 
+def lock(size):
+    """PRIVATE MATCH: a padlock."""
+    s = 4
+    w = size * s
+    img = Image.new('RGBA', (w, w), CLEAR)
+    d = ImageDraw.Draw(img)
+    d.ellipse((w * .26, w * .06, w * .74, w * .54), fill=WHITE)                 # shackle
+    d.ellipse((w * .36, w * .16, w * .64, w * .44), fill=CLEAR)
+    d.rectangle((w * .36, w * .3, w * .64, w * .46), fill=CLEAR)
+    d.rectangle((w * .26, w * .3, w * .36, w * .46), fill=WHITE)
+    d.rectangle((w * .64, w * .3, w * .74, w * .46), fill=WHITE)
+    d.rounded_rectangle((w * .14, w * .44, w * .86, w * .94), radius=w * .07, fill=WHITE)   # body
+    d.ellipse((w * .43, w * .56, w * .57, w * .7), fill=CLEAR)                  # keyhole
+    d.rectangle((w * .47, w * .64, w * .53, w * .82), fill=CLEAR)
+    return img.resize((size, size), Image.LANCZOS)
+
+
+def chart(size):
+    """The stats box: three rising bars on a base line."""
+    s = 4
+    w = size * s
+    img = Image.new('RGBA', (w, w), CLEAR)
+    d = ImageDraw.Draw(img)
+    for x, top in ((.12, .55), (.4, .32), (.68, .1)):
+        d.rounded_rectangle((w * x, w * top, w * (x + .2), w * .84), radius=w * .03, fill=WHITE)
+    d.rectangle((w * .04, w * .88, w * .96, w * .95), fill=WHITE)
+    return img.resize((size, size), Image.LANCZOS)
+
+
+def speed(size):
+    """LAST THROW: a disc flying right, with speed lines behind it."""
+    s = 4
+    w = size * s
+    img = Image.new('RGBA', (w, w), CLEAR)
+    d = ImageDraw.Draw(img)
+    c, r = (w * .7, w / 2), w * .27
+    d.ellipse((c[0] - r, c[1] - r, c[0] + r, c[1] + r), fill=WHITE)
+    d.ellipse((c[0] - r * .62, c[1] - r * .62, c[0] + r * .62, c[1] + r * .62), fill=CLEAR)
+    d.ellipse((c[0] - r * .3, c[1] - r * .3, c[0] + r * .3, c[1] + r * .3), fill=WHITE)
+    for y, x0 in ((.3, .14), (.5, .02), (.7, .14)):
+        d.rounded_rectangle((w * x0, w * (y - .045), w * .38, w * (y + .045)), radius=w * .045, fill=WHITE)
+    return img.resize((size, size), Image.LANCZOS)
+
+
+def monitor(size):
+    """GRAPHICS: a screen on a stand."""
+    s = 4
+    w = size * s
+    img = Image.new('RGBA', (w, w), CLEAR)
+    d = ImageDraw.Draw(img)
+    d.rounded_rectangle((w * .04, w * .12, w * .96, w * .72), radius=w * .06, fill=WHITE)
+    d.rectangle((w * .13, w * .21, w * .87, w * .63), fill=CLEAR)
+    d.polygon([(w * .2, w * .58), (w * .42, w * .36), (w * .56, w * .5), (w * .66, w * .42), (w * .8, w * .58)], fill=WHITE)
+    d.rectangle((w * .44, w * .72, w * .56, w * .84), fill=WHITE)
+    d.rounded_rectangle((w * .26, w * .84, w * .74, w * .92), radius=w * .03, fill=WHITE)
+    return img.resize((size, size), Image.LANCZOS)
+
+
+def potato(size):
+    """GRAPHICS while LOW is chosen: the same screen with a potato on it."""
+    s = 4
+    w = size * s
+    img = Image.new('RGBA', (w, w), CLEAR)
+    d = ImageDraw.Draw(img)
+    d.rounded_rectangle((w * .04, w * .12, w * .96, w * .72), radius=w * .06, fill=WHITE)
+    d.rectangle((w * .13, w * .21, w * .87, w * .63), fill=CLEAR)
+    spud = Image.new('RGBA', (w, w), CLEAR)            # a lumpy tan oval, tilted, with darker eyes
+    p = ImageDraw.Draw(spud)
+    tan, shade, eye = (206, 160, 98, 255), (168, 122, 66, 255), (110, 74, 36, 255)
+    for fill, grow in ((shade, 0), (tan, -.02)):          # a darker rim (both lumps), then the potato inside it
+        for x0, y0, x1, y1 in ((.17, .33, .6, .55), (.45, .29, .84, .52)):
+            p.ellipse((w * (x0 - grow), w * (y0 - grow), w * (x1 + grow), w * (y1 + grow)), fill=fill)
+    for x, y in ((.3, .43), (.55, .46), (.7, .38)):
+        p.arc((w * (x - .035), w * (y - .02), w * (x + .035), w * (y + .03)), 200, 340, fill=eye, width=round(w * .014))
+    img.alpha_composite(spud.rotate(-12, center=(w / 2, w * .42), resample=Image.BICUBIC))
+    d.rectangle((w * .44, w * .72, w * .56, w * .84), fill=WHITE)
+    d.rounded_rectangle((w * .26, w * .84, w * .74, w * .92), radius=w * .03, fill=WHITE)
+    return img.resize((size, size), Image.LANCZOS)
+
+
 def speaker(size):
     s = 4
     w = size * s
