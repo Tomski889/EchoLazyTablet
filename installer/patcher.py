@@ -22,7 +22,7 @@ import echodata as E
 import graphics
 import tablet
 
-VERSION = '3.19'
+VERSION = '3.20'
 EXE_TIMESTAMP = 1683152886
 DATA = Path('_data/5932408047/rad15/win10')
 STOCK_PACKAGES = 3
@@ -187,6 +187,53 @@ def has_loader(game):
         return b'[EchoLoader]' in (game.bin / 'dbgcore.dll').read_bytes()
     except OSError:
         return False
+
+
+# EchoLoader as EchoVRCE's community update ships it (its update manifest lists each file's SHA-256),
+# with the MinGW runtime DLLs it needs, all in bin\win10.
+LOADER_MANIFEST = 'https://release.echovr.de/updates/update.manifest'
+LOADER_BASE = 'https://files.echovr.de/updates/'
+LOADER_FILES = ('dbgcore.dll', 'libgcc_s_seh-1.dll', 'libstdc++-6.dll', 'libwinpthread-1.dll')
+
+
+def install_loader(game, log=print):
+    """Downloads EchoLoader from the EchoVRCE community update into bin\\win10, each file checked
+    against the update manifest's SHA-256. A dbgcore.dll already there is kept as dbgcore.echoqueue-orig.dll."""
+    import hashlib
+    import urllib.request
+
+    def fetch(url):
+        req = urllib.request.Request(url, headers={'User-Agent': f'EchoLazyTablet/{VERSION}'})
+        try:
+            with urllib.request.urlopen(req, timeout=60) as r:
+                return r.read()
+        except OSError as e:
+            raise InstallError(f"Couldn't download EchoLoader ({url}): {getattr(e, 'reason', e)}. Check your internet connection.")
+
+    if echo_running():
+        raise InstallError('Echo VR is running. Close it first.')
+    hashes = {}
+    for line in fetch(LOADER_MANIFEST).decode('utf-8', 'replace').splitlines():
+        parts = line.split()
+        if len(parts) == 3 and parts[0] == 'add':
+            hashes.setdefault(parts[1], parts[2].lower())
+    wanted = list(LOADER_FILES) + ([] if (game.bin / 'echoloader.json').exists() else ['echoloader.json'])
+    files = {}
+    for name in wanted:
+        if name not in hashes:
+            raise InstallError(f"EchoVRCE's update list doesn't have {name} any more; install EchoLoader by hand.")
+        log(f'Downloading {name}...')
+        data = fetch(LOADER_BASE + name)
+        if hashlib.sha256(data).hexdigest() != hashes[name]:
+            raise InstallError(f"{name} from EchoVRCE's server didn't match its checksum; nothing was changed. Try again later.")
+        files[name] = data
+    old = game.bin / 'dbgcore.dll'
+    if old.exists() and not (game.bin / 'dbgcore.echoqueue-orig.dll').exists():
+        _replace(game.bin / 'dbgcore.echoqueue-orig.dll', old.read_bytes())
+    for name, data in files.items():
+        _replace(game.bin / name, data)
+    (game.bin / 'plugins').mkdir(exist_ok=True)
+    log('EchoLoader installed (bin\\win10\\dbgcore.dll, from the EchoVRCE community update).')
 
 
 def check(game, need_closed=True):

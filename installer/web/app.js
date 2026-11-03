@@ -19,6 +19,9 @@ const STAGES = {
   install: [['check', 'Checking your game'], ['build', 'Building your PLAY tab'], ['write', 'Installing the tab'],
             ['verify', 'Double-checking'], ['plugin', 'Adding the EchoLazyTablet plugin'],
             ['graphics', 'Making the LOW graphics files (a minute or two)']],
+  loader: [['loader', 'Downloading EchoLoader'], ['check', 'Checking your game'], ['build', 'Building your PLAY tab'],
+           ['write', 'Installing the tab'], ['verify', 'Double-checking'], ['plugin', 'Adding the EchoLazyTablet plugin'],
+           ['graphics', 'Making the LOW graphics files (a minute or two)']],
   uninstall: [['check', 'Checking your game'], ['write', 'Taking the PLAY tab out'], ['plugin', 'Removing the plugin']],
 };
 
@@ -44,7 +47,11 @@ function situation(v) {
   if (!s || s.found === false) return { kind: 'bad', title: "Can't find Echo VR", text: 'Show us where it is: pick the folder called ready-at-dawn-echo-arena.', action: 'browse' };
   const p = s.problems.join(' ');
   if (WRONG_BUILD.test(p)) return { kind: 'bad', title: 'Different Echo VR version', text: s.problems.find((x) => WRONG_BUILD.test(x)) };
-  if (/EchoLoader/.test(p)) return { kind: 'bad', title: 'EchoLoader needed', text: 'Install EchoLoader first: EchoLazyTablet runs as one of its plugins.' };
+  if (/EchoLoader/.test(p)) {
+    const others = s.problems.filter((x) => !/EchoLoader|running/.test(x));
+    if (others.length) return { kind: 'bad', title: "Can't add the tab", text: others.join('\n') };
+    return { kind: 'warn', title: 'EchoLoader needed', text: /running/.test(p) ? 'Close Echo VR first.' : 'EchoLazyTablet runs as an EchoLoader plugin. One click downloads EchoLoader (from EchoVRCE) and installs both.', action: 'loader' };
+  }
   if (s.problems.some((x) => !/running/.test(x))) return { kind: 'bad', title: "Can't add the tab", text: s.problems.filter((x) => !/running/.test(x)).join('\n') };
   const running = /running/.test(p);
   if (s.state.includes('now EchoLazyTablet')) return { kind: 'warn', title: 'EchoQueue is now EchoLazyTablet', text: running ? 'Close Echo VR, then update.' : 'Update to the new version. Your settings are kept.', action: 'repair' };
@@ -77,7 +84,7 @@ function renderMain(v) {
   const busy = v.job.busy || v.scanning;
   const blocked = !sit.action || /running/.test(s && s.problems ? s.problems.join(' ') : '');
   $('install').disabled = busy || blocked;
-  $('ctatext').textContent = sit.action === 'browse' ? 'Find my Echo VR folder' : sit.action === 'repair' ? (sit.installed ? 'Repair EchoLazyTablet' : 'Repair now') : 'Install EchoLazyTablet';
+  $('ctatext').textContent = sit.action === 'browse' ? 'Find my Echo VR folder' : sit.action === 'loader' ? 'Get EchoLoader and install' : sit.action === 'repair' ? (sit.installed ? 'Repair EchoLazyTablet' : 'Repair now') : 'Install EchoLazyTablet';
   $('ctaicon').innerHTML = sit.action === 'browse' ? ICONS.folder : sit.action === 'repair' ? ICONS.repair : ICONS.install;
   $('uninstall').hidden = !(s && s.state && (s.state.startsWith('installed') || s.state.includes('Repair')));
   $('uninstall').disabled = busy;
@@ -334,14 +341,14 @@ function renderJob(v) {
   if (inJob) {
     const stages = STAGES[job.kind] || STAGES.install;
     const at = Math.max(0, stages.findIndex(([k]) => k === job.stage));
-    $('ptitle').textContent = job.kind === 'install' ? (situation(v).installed ? 'Repairing EchoLazyTablet' : 'Installing EchoLazyTablet') : 'Removing EchoLazyTablet';
+    $('ptitle').textContent = job.kind === 'loader' ? 'Installing EchoLoader and EchoLazyTablet' : job.kind === 'install' ? (situation(v).installed ? 'Repairing EchoLazyTablet' : 'Installing EchoLazyTablet') : 'Removing EchoLazyTablet';
     $('pfill').style.width = `${Math.round(((at + .6) / stages.length) * 100)}%`;
     $('steps').replaceChildren(...stages.map(([, label], i) => el('li', i < at ? 'done' : i === at ? 'now' : '', label)));
   }
   if (done) {
     $('rbadge').className = 'badge' + (job.ok ? '' : ' bad');
     $('rmark').setAttribute('d', job.ok ? 'M15 27l7 7 15-16' : 'M18 18l16 16M34 18L18 34');
-    $('rtitle').textContent = job.ok ? (job.kind === 'install' ? 'All set!' : 'Removed') : "That didn't work";
+    $('rtitle').textContent = job.ok ? (job.kind !== 'uninstall' ? 'All set!' : 'Removed') : "That didn't work";
     $('rtext').textContent = job.message;
     $('log').replaceChildren(...job.log.map((l) => el('li', '', l)));
     $('admin').hidden = !job.admin;
@@ -374,9 +381,14 @@ function confirmBox(title, text, yes) {
 
 $('install').onclick = async () => {
   if (situation(view).action === 'browse') return render(await api('browse', {}));
+  if (situation(view).action === 'loader') {
+    if (!(await confirmBox('Get EchoLoader?', 'This downloads EchoLoader from the EchoVRCE community server (files.echovr.de) into your game folder, then installs EchoLazyTablet.\nKeep Echo VR closed until it\'s done.', 'Download and install'))) return;
+    showResult = true;
+    return render(await api('loader', {}));
+  }
   const repair = situation(view).action === 'repair';
   const ok = await confirmBox(repair ? 'Repair EchoLazyTablet?' : 'Install EchoLazyTablet?',
-    `${repair ? 'This rebuilds the PLAY tab on your tablet as it is now.' : 'This adds the PLAY tab to your hand tablet.'}\nKeep Echo VR closed until it's done.`,
+    `${repair ? 'This rebuilds the PLAY tab on your tablet as it is now.' : 'This adds the PLAY tab to your hand tablet.'}\nKeep Echo VR closed until it\'s done.`,
     repair ? 'Repair' : 'Install');
   if (!ok) return;
   showResult = true;

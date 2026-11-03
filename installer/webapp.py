@@ -89,9 +89,12 @@ class State:
         def work():
             ok, message, admin = False, '', False
             try:
-                (patcher.install if kind == 'install' else patcher.uninstall)(game, log=log, stage=stage)
+                if kind == 'loader':           # EchoLoader first, then EchoLazyTablet as one of its plugins
+                    stage('loader')
+                    patcher.install_loader(game, log=log)
+                (patcher.uninstall if kind == 'uninstall' else patcher.install)(game, log=log, stage=stage)
                 ok = True
-                message = ('Start Echo VR: SFX and PLAY are the first tabs on your hand tablet.' if kind == 'install'
+                message = ('Start Echo VR: SFX and PLAY are the first tabs on your hand tablet.' if kind != 'uninstall'
                            else 'EchoLazyTablet has been removed. Your other mods are as they were.')
             except patcher.InstallError as e:
                 message = str(e)
@@ -195,7 +198,7 @@ class Handler(BaseHTTPRequestHandler):
                     STATE.game, STATE.scan = picked, None
                 STATE.rescan()
             return self.send(200, STATE.view())
-        if path in ('/api/install', '/api/uninstall'):
+        if path in ('/api/install', '/api/uninstall', '/api/loader'):
             STATE.run(path.rsplit('/', 1)[1])
             return self.send(200, STATE.view())
         if path == '/api/graphics':   # the preview's GRAPHICS HIGH / LOW, as on the tablet

@@ -1,4 +1,4 @@
-EchoLazyTablet 3.19 - Echo Arena matchmaking from your hand tablet (Echo VR, EchoVRCE)
+EchoLazyTablet 3.20 - Echo Arena matchmaking from your hand tablet (Echo VR, EchoVRCE)
 
 What it does
   A PLAY tab, second on the hand tablet's tab bar (after SFX, below):
@@ -36,6 +36,9 @@ Installing (players)
   inside the zip), run EchoLazyTabletInstaller.exe in the extracted folder. Its window (shown by Microsoft Edge, part of Windows;
   without Edge it opens in your browser) finds Echo (or use Change...), shows your tab bar as it will
   look, checks your setup, and offers Install / Repair / Uninstall.
+  * No EchoLoader yet: the window offers "Get EchoLoader and install", which downloads EchoLoader
+    from the EchoVRCE community update (files.echovr.de, each file checked against its SHA-256) into
+    bin\win10, then installs EchoLazyTablet. A dbgcore.dll already there is kept as dbgcore.echoqueue-orig.dll.
   * Echo Mods: applying an Echo Mods profile switches off plugins the profile doesn't name, so the
     installer names EchoLazyTablet (on) in every Echo Mods profile. If Echo Mods rebuilds the lobby from an
     older snapshot, the window says so: run Repair afterwards.
