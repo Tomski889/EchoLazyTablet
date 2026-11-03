@@ -65,3 +65,20 @@ def house(size):
     d.rectangle((left + t, eave, right - t, base - t), fill=CLEAR)
     d.rectangle((w * .41, w * .58, w * .59, base), fill=WHITE)                                   # door
     return img.resize((size, size), Image.LANCZOS)
+
+
+def speaker(size):
+    s = 4
+    w = size * s
+    img = Image.new('RGBA', (w, w), CLEAR)
+    d = ImageDraw.Draw(img)
+    d.polygon([(w * .06, w * .36), (w * .24, w * .36), (w * .46, w * .14), (w * .46, w * .86), (w * .24, w * .64), (w * .06, w * .64)], fill=WHITE)
+    c = w * .46
+    for r_out, r_in in ((.2, .12), (.38, .3)):   # the sound: two arcs, clear of the cone
+        ring = Image.new('RGBA', (w, w), CLEAR)
+        a = ImageDraw.Draw(ring)
+        box = lambda r: (c - w * r, w / 2 - w * r, c + w * r, w / 2 + w * r)
+        a.pieslice(box(r_out), -50, 50, fill=WHITE)
+        a.ellipse(box(r_in), fill=CLEAR)
+        img.alpha_composite(ring)
+    return img.resize((size, size), Image.LANCZOS)

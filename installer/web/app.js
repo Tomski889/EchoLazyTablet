@@ -197,7 +197,7 @@ async function setGraphics(mode) {
 
 function pageKinds(preview) {
   let stock = 0;
-  return preview.map((t) => (t.ours ? 'play' : t.stock ? (STOCK_PAGES[stock++] || 'stock') : 'other'));
+  return preview.map((t) => (t.sound ? 'sounds' : t.ours ? 'play' : t.stock ? (STOCK_PAGES[stock++] || 'stock') : 'other'));
 }
 
 function html(tag, cls, inner) { const e = el(tag, cls); e.innerHTML = inner; return e; }
@@ -244,7 +244,7 @@ setInterval(renderClock, 1000);
 function renderPage(kind, tab, p) {
   const page = $('tpage');
   page.className = 'page ' + kind;
-  $('tclock').hidden = $('tfmt').hidden = kind !== 'play';
+  $('tclock').hidden = $('tfmt').hidden = kind !== 'play' && kind !== 'sounds';
   const name = (p && p.name) || 'YOU';
   const heading = (title, sub) => { $('ttitle').textContent = title; $('tsub').textContent = sub || ''; };
   if (kind === 'play') {
@@ -262,6 +262,13 @@ function renderPage(kind, tab, p) {
     }
     boxes.append(graphicsBox());
     page.replaceChildren(card, row, boxes);
+  } else if (kind === 'sounds') {
+    heading('SFX', 'SOUNDBOARD');
+    const boxes = el('div', 'boxes');
+    for (let i = 1; i <= 8; i++) {
+      const b = el('div'); b.append(el('small', '', 'SOUND ' + i), el('span', '', 'TAP TO SET')); boxes.append(b);
+    }
+    page.replaceChildren(message('Eight buttons, each pressing a key you pick, for Voicemod and other soundboards.'), boxes);
   } else if (kind === 'home') {
     heading(name);
     const level = el('div', 'hbox');
@@ -306,15 +313,15 @@ function renderTablet(v) {
   preview.forEach((t, i) => {
     const tab = el('button', 't' + (t.ours ? ' ours' : t.stock ? '' : ' other') + (i === at ? ' sel' : ''));
     tab.type = 'button';
-    tab.title = { play: 'PLAY', home: 'Home', lobby: 'Lobby', party: 'Party', friends: 'Friends' }[kinds[i]] || 'Another mod';
+    tab.title = { play: 'PLAY', sounds: 'SFX', home: 'Home', lobby: 'Lobby', party: 'Party', friends: 'Friends' }[kinds[i]] || 'Another mod';
     if (t.png) { const img = el('img'); img.src = t.png; img.alt = ''; tab.append(img); } else tab.textContent = (t.text || 'TAB').slice(0, 6);
     tab.onclick = () => { selected = i; renderTablet(view); };
     if (!t.ours && !t.stock) others++;
     bar.append(tab);
   });
   $('caption').textContent = (others
-    ? `Your tab bar, with PLAY added first. ${others} tab${others > 1 ? 's' : ''} from another mod (dashed) keep${others > 1 ? '' : 's'} working.`
-    : 'Your tab bar, with PLAY added first.') + (preview.length ? ' Tap a tab to see your page.' : '');
+    ? `Your tab bar, with SFX and PLAY added first. ${others} tab${others > 1 ? 's' : ''} from another mod (dashed) keep${others > 1 ? '' : 's'} working.`
+    : 'Your tab bar, with SFX and PLAY added first.') + (preview.length ? ' Tap a tab to see your page.' : '');
 }
 
 function renderJob(v) {

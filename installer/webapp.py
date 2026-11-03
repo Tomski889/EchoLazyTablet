@@ -91,7 +91,7 @@ class State:
             try:
                 (patcher.install if kind == 'install' else patcher.uninstall)(game, log=log, stage=stage)
                 ok = True
-                message = ('Start Echo VR: PLAY is the first tab on your hand tablet.' if kind == 'install'
+                message = ('Start Echo VR: SFX and PLAY are the first tabs on your hand tablet.' if kind == 'install'
                            else 'EchoLazyTablet has been removed. Your other mods are as they were.')
             except patcher.InstallError as e:
                 message = str(e)

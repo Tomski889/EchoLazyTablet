@@ -249,6 +249,11 @@ constexpr const char* STAT_CAPTIONS[STAT_MODES] = {"HOURS TODAY", "MATCHES OVERA
 std::atomic<int> statMode{STAT_TODAY};
 // The clock in the title strip: 24-hour, or 12-hour with AM / PM ([clock] format=12); its switch flips it.
 std::atomic<bool> clock12{false};
+constexpr unsigned SOUND_PADS = sizeof QUEUE_SOUND_BUTTONS / sizeof QUEUE_SOUND_BUTTONS[0];
+// The SFX tab's keybinds ([sounds] key1..key8; "" not set) and what their buttons say. Under tabletMutex.
+std::array<std::string, SOUND_PADS> soundKeys, soundLabels;
+std::array<std::string, SOUND_PADS> soundNames;   // [sounds] name1..name8, or SOUND 1..8
+void setSoundKey(unsigned pad, const std::string& spec);
 std::atomic<U> fadeDelayMs{FADE_DELAY_MS};  // button to black ([fade] delay_ms)
 
 // Our searches must also be joined (the menu's JoinFoundMatch step); see joinTick.
@@ -363,7 +368,35 @@ void loadPrivateServer() {
     else logf("settings: private matches on %s (%zu port(s), %u first)", privateServer.c_str(), privatePorts.size(), unsigned(privatePorts[0]));
 }
 
+std::string iniKeys(const wchar_t* section, const wchar_t* name) {
+    wchar_t buffer[64];
+    GetPrivateProfileStringW(section, name, L"", buffer, 64, iniPath().c_str());
+    std::string spec;
+    for (const wchar_t* c = buffer; *c; c++) spec += char(*c);
+    return spec;
+}
+
+std::wstring soundIniKey(unsigned pad) { return L"key" + std::to_wstring(pad + 1); }
+
+// What an SFX button is called: [sounds] nameN (e.g. the sound's file name), in capitals, without a
+// file extension and cut to fit the button; SOUND N when there's none.
+std::string soundName(unsigned pad) {
+    wchar_t buffer[64];
+    GetPrivateProfileStringW(L"sounds", (L"name" + std::to_wstring(pad + 1)).c_str(), L"", buffer, 64, iniPath().c_str());
+    std::string name;
+    for (const wchar_t* c = buffer; *c; c++) name += *c < 128 ? char(toupper(int(*c))) : '?';
+    size_t dot = name.rfind('.');
+    if (dot != std::string::npos && dot > 0 && name.size() - dot >= 3 && name.size() - dot <= 5) name.resize(dot);
+    name.erase(name.find_last_not_of(" \t") + 1);
+    if (name.size() > 16) name = name.substr(0, 15) + ".";
+    return name.empty() ? "SOUND " + std::to_string(pad + 1) : name;
+}
+
 void loadSettings() {
+    for (unsigned i = 0; i < SOUND_PADS; i++) {
+        setSoundKey(i, iniKeys(L"sounds", soundIniKey(i).c_str()));
+        soundNames[i] = soundName(i);
+    }
     wchar_t key[16];
     GetPrivateProfileStringW(L"queue", L"hotkey", L"F9", key, 16, iniPath().c_str());
     hotkey = parseKey(key);
@@ -1713,7 +1746,7 @@ DWORD WINAPI playersWatch(LPVOID) {
 // sends the account's ID and display name from the saved profile (xplatformid, displayname)
 // and gets back blocked or not. The answer is kept in EchoLazyTablet.ini ([access] blocked) for
 // when the service can't be reached; with no answer ever, EchoLazyTablet stays on.
-constexpr const char* ECHOQUEUE_VERSION = "3.16";
+constexpr const char* ECHOQUEUE_VERSION = "3.17";
 constexpr const wchar_t* ACCESS_HOST = L"echoqueue.dokuyegar.workers.dev";  // the deployed Worker (server/worker.js)
 constexpr U ACCESS_EVERY_MS = 15 * 60 * 1000;
 
@@ -1931,7 +1964,7 @@ bool loadLayout() {
 
 struct View { void* p = nullptr; bool saved = false; float opacity = 1; };
 // Other: another mod's tab (Echo Arcade's) was pressed last; its own plugin draws that page.
-enum class Page { Stock, Queue, Other };
+enum class Page { Stock, Queue, Sounds, Other };
 struct Context {
     Page page = Page::Stock;
     bool sawOther = false;      // another mod's page has been up (it may leave stock pages faded)
@@ -1944,10 +1977,18 @@ struct Context {
     std::string status, timer, timerCaption, statCaption, matches, gfxCaption;  // what the page's dynamic text shows
     int searchShown = -1;       // the searching layout (teal card, timer, CANCEL SEARCH) shown
     int gfxShown = -2;          // the graphics choice lit (GFX_*)
-    bool setup = false;         // the CLIP HOTKEY page is up instead of the PLAY page
+    bool setup = false;         // the hotkey keyboard is up instead of the PLAY or SFX page
+    int setupSlot = -1;         // what it's picking for: -1 CLIP, otherwise that SFX button
+    U setupChangedAt = 0;       // when it opened or closed (a finger still there would press what's underneath)
+    bool editing = false;       // SFX page: tapping a button picks its key
     bool ctrl = false, shift = false, alt = false;   // its modifiers, and its key ("" none yet)
-    std::string key, titleText, subtitleText, clockText, clockFormatText;
-    U pickFirstUntil = 0;       // SAVE with no key: says so for a moment
+    std::string key, titleText, subtitleText, clockText, clockFormatText, keyOtherText;
+    bool naming = false;        // after an SFX button's key: typing its name on the same keyboard
+    std::string name, keyCtrlText, keyShiftText, keyAltText;
+    std::string soundStatus, soundEditText;
+    std::array<std::string, SOUND_PADS> soundText, soundCaption;
+    std::string pickMessage;    // SAVE refused: says why for a moment
+    U pickFirstUntil = 0;
     int modsShown = -1;
     int applied = -1;           // page visibility last applied (1 PLAY, 0 stock)
     U polledAt = 0;
@@ -1974,8 +2015,14 @@ const QueueKey* keyFor(U n) {
         if (k.name == n) return &k;
     return nullptr;
 }
+int soundPad(U n) {
+    for (unsigned i = 0; i < SOUND_PADS; i++)
+        if (QUEUE_SOUND_BUTTONS[i] == n) return int(i);
+    return -1;
+}
+bool onOurPage(const Context& c) { return c.page == Page::Queue || c.page == Page::Sounds; }
 bool isOurs(U n) {
-    if (keyFor(n) || n == QUEUE_CLIP_KEY) return true;
+    if (keyFor(n) || n == QUEUE_CLIP_KEY || soundPad(n) >= 0 || n == QUEUE_SOUND_TAB || n == QUEUE_SOUND_EDIT) return true;
     return n == QUEUE_TAB || n == QUEUE_START || n == QUEUE_CANCEL || n == QUEUE_LOBBY || n == QUEUE_PRIVATE || n == QUEUE_STATS ||
            n == QUEUE_GFX_HIGH || n == QUEUE_GFX_LOW || n == QUEUE_CLIP || n == QUEUE_CLOCK;
 }
@@ -2270,10 +2317,10 @@ void graphicsLiveTick() {
     gfxBusy = false;
 }
 
-// ---- CLIP ----
-// Presses the player's clip keybind ([clip] keys, e.g. ctrl+t for Medal) as if typed, for clip
-// recorders listening for a global hotkey. Modifiers ctrl/shift/alt/win, then one key: a letter or
-// digit, F1..F24, or a name below.
+// ---- CLIP and SFX ----
+// Presses a keybind ([clip] keys, e.g. ctrl+t for Medal, or [sounds] key1..key8) as if typed, for
+// clip recorders and soundboards listening for a global hotkey. Modifiers ctrl/shift/alt/win, then
+// one key: a letter or digit, F1..F24, or a name below.
 struct Keys { std::vector<WORD> vks; std::string text; };
 
 bool parseKeys(const std::string& spec, Keys& out) {
@@ -2311,18 +2358,23 @@ bool parseKeys(const std::string& spec, Keys& out) {
     return !out.vks.empty();
 }
 
-std::string clipKeysSpec() {
-    wchar_t buffer[64];
-    GetPrivateProfileStringW(L"clip", L"keys", L"", buffer, 64, iniPath().c_str());
-    std::string spec;
-    for (const wchar_t* c = buffer; *c; c++) spec += char(*c);
-    return spec;
+std::string clipKeysSpec() { return iniKeys(L"clip", L"keys"); }
+
+void setSoundKey(unsigned pad, const std::string& spec) {
+    Keys keys;
+    bool valid = parseKeys(spec, keys);
+    soundKeys[pad] = valid ? spec : "";
+    soundLabels[pad] = valid ? keys.text : "TAP TO SET";
+    if (!valid && !spec.empty()) logf("sounds: can't read [sounds] key%u=%s", pad + 1, spec.c_str());
 }
 
-DWORD WINAPI pressClipKeys(LPVOID) {
+DWORD WINAPI pressKeysThread(LPVOID arg) {
+    std::unique_ptr<std::string> spec(static_cast<std::string*>(arg));
+    // One at a time: quick taps would otherwise let go of each other's modifiers.
+    static std::mutex pressing;
+    std::lock_guard<std::mutex> lock(pressing);
     Keys keys;
-    std::string spec = clipKeysSpec();
-    if (!parseKeys(spec, keys)) { logf("clip: can't read [clip] keys=%s", spec.c_str()); return 0; }
+    if (!parseKeys(*spec, keys)) { logf("keys: can't read %s", spec->c_str()); return 0; }
     std::vector<INPUT> down, up;
     for (WORD vk : keys.vks) {
         INPUT in{};
@@ -2336,8 +2388,14 @@ DWORD WINAPI pressClipKeys(LPVOID) {
     UINT sent = SendInput(UINT(down.size()), down.data(), sizeof(INPUT));
     Sleep(60);   // held a moment: some recorders poll the keyboard
     sent += SendInput(UINT(up.size()), up.data(), sizeof(INPUT));
-    logf("clip: pressed %s (%u of %zu key events sent)", keys.text.c_str(), sent, down.size() * 2);
+    logf("keys: pressed %s (%u of %zu key events sent)", keys.text.c_str(), sent, down.size() * 2);
     return 0;
+}
+
+void pressKeys(const std::string& spec) {
+    auto* copy = new std::string(spec);
+    if (HANDLE t = CreateThread(nullptr, 0, pressKeysThread, copy, 0, nullptr)) CloseHandle(t);
+    else delete copy;
 }
 
 std::string elapsed(U ms) {
@@ -2374,7 +2432,8 @@ void ensure(void* canvas, unsigned element, bool visible) {
 }
 
 void render(Context& c) {
-    bool active = c.page == Page::Queue && !tabletFault;
+    bool active = onOurPage(c) && !tabletFault;
+    bool play = active && c.page == Page::Queue, sounds = active && c.page == Page::Sounds;
     U now = GetTickCount64();
     bool changed = c.applied != int(active);
     c.applied = int(active);
@@ -2403,21 +2462,30 @@ void render(Context& c) {
     if (overlay && changed)
         for (unsigned i : {QUEUE_PAGE_COVER, QUEUE_PAGE_HEADER, QUEUE_PAGE_TITLE, QUEUE_PAGE_SUBTITLE})
             ensure(overlay, i, active);
-    if (overlay) {   // the PLAY page or, in its place, the CLIP HOTKEY page
-        ensure(overlay, QUEUE_PAGE_PAGE, active && !c.setup);
+    if (overlay) {   // the PLAY or SFX page or, in its place, the hotkey keyboard
+        ensure(overlay, QUEUE_PAGE_PAGE, play && !c.setup);
+        ensure(overlay, QUEUE_PAGE_SOUND_PAGE, sounds && !c.setup);
         ensure(overlay, QUEUE_PAGE_KEYBOARD, active && c.setup);
         for (unsigned i : {QUEUE_PAGE_CLOCK, QUEUE_PAGE_CLOCK_FORMAT, QUEUE_PAGE_CLOCK_FORMAT_TEXT})  // (the hotkey needs the room)
             ensure(overlay, i, active && !c.setup);
     }
-    if (overlay && active) {   // the title strip: PLAY, or CLIP and the hotkey picked so far
-        std::string sub = "ARENA MATCHMAKING";
-        if (c.setup && now < c.pickFirstUntil) sub = "PICK A KEY, THEN SAVE";
-        else if (c.setup && !c.ctrl && !c.shift && !c.alt && c.key.empty()) sub = "PICK YOUR CLIP APP'S HOTKEY";
+    if (overlay && active) {   // the title strip: PLAY or SFX, or what's being set and the hotkey picked so far
+        std::string sub = sounds ? "SOUNDBOARD" : "ARENA MATCHMAKING";
+        if (c.setup && now < c.pickFirstUntil) sub = c.pickMessage;
+        else if (c.setup && c.naming) sub = c.name.empty() ? "TYPE A NAME, THEN SAVE" : "NAME: " + c.name;
+        else if (c.setup && !c.ctrl && !c.shift && !c.alt && c.key.empty()) sub = c.setupSlot < 0 ? "PICK YOUR CLIP APP'S HOTKEY" : "PICK YOUR SOUND'S HOTKEY";
         else if (c.setup)
             sub = "HOTKEY: " + std::string(c.ctrl ? "CTRL + " : "") + (c.shift ? "SHIFT + " : "") + (c.alt ? "ALT + " : "") +
                   (c.key.empty() ? "..." : c.key);
-        setText(overlay, QUEUE_PAGE_TITLE, c.titleText, c.setup ? "CLIP" : "PLAY");
+        std::string heading = !c.setup ? (sounds ? "SFX" : "PLAY") : c.setupSlot < 0 ? "CLIP" : "SFX " + std::to_string(c.setupSlot + 1);
+        setText(overlay, QUEUE_PAGE_TITLE, c.titleText, heading);
         setText(overlay, QUEUE_PAGE_SUBTITLE, c.subtitleText, sub);
+        if (c.setup) {   // while naming, the bottom row's keys type instead
+            setText(overlay, QUEUE_PAGE_KEY_NO_CLIP_APP_TEXT, c.keyOtherText, c.naming ? "NO NAME" : c.setupSlot < 0 ? "NO CLIP APP" : "CLEAR");
+            setText(overlay, QUEUE_PAGE_KEY_CTRL_TEXT, c.keyCtrlText, c.naming ? "SPACE" : "CTRL");
+            setText(overlay, QUEUE_PAGE_KEY_SHIFT_TEXT, c.keyShiftText, c.naming ? "DELETE" : "SHIFT");
+            setText(overlay, QUEUE_PAGE_KEY_ALT_TEXT, c.keyAltText, c.naming ? "CLEAR" : "ALT");
+        }
         SYSTEMTIME t;
         GetLocalTime(&t);
         bool twelve = clock12;
@@ -2428,22 +2496,24 @@ void render(Context& c) {
         setText(overlay, QUEUE_PAGE_CLOCK_FORMAT_TEXT, c.clockFormatText, twelve ? "12H" : "24H");
     }
     if (overlay && active && c.setup) {
-        int mods = c.ctrl | c.shift << 1 | c.alt << 2;
+        int mods = c.naming ? 0 : c.ctrl | c.shift << 1 | c.alt << 2;
         if (c.modsShown != mods) {
-            ensure(overlay, QUEUE_PAGE_MOD_CTRL, c.ctrl);
-            ensure(overlay, QUEUE_PAGE_MOD_SHIFT, c.shift);
-            ensure(overlay, QUEUE_PAGE_MOD_ALT, c.alt);
+            ensure(overlay, QUEUE_PAGE_MOD_CTRL, mods & 1);
+            ensure(overlay, QUEUE_PAGE_MOD_SHIFT, mods & 2);
+            ensure(overlay, QUEUE_PAGE_MOD_ALT, mods & 4);
             c.modsShown = mods;
         }
     }
     // Tab highlight: ours while our page is up, otherwise the stock ones (which the game's
     // own scripts keep pointing at the right stock tab). While ours is up, the game may
     // re-show its highlight; re-checked a few times a second, not every frame.
-    int nav = active ? 1 : 0;
+    int nav = play ? 1 : sounds ? 2 : 0;
     if (overlay && c.views[1].p && (c.navState != nav || (active && now - c.navCheckedAt > 250))) {
         c.navCheckedAt = now;
         ensure(overlay, QUEUE_PAGE_TAB_SELECTED, nav == 1);
-        ensure(overlay, QUEUE_PAGE_TAB_ICON, nav == 0);
+        ensure(overlay, QUEUE_PAGE_TAB_ICON, nav != 1);
+        ensure(overlay, QUEUE_PAGE_SOUND_TAB_SELECTED, nav == 2);
+        ensure(overlay, QUEUE_PAGE_SOUND_TAB_ICON, nav != 2);
         if (active) {
             for (auto i : layout.navStockSelected) ensure(c.views[1].p, i, false);
             for (auto i : layout.navOtherSelected) ensure(c.views[1].p, i, false);  // their own plugin shows them again
@@ -2452,7 +2522,15 @@ void render(Context& c) {
         c.navState = nav;
     }
     void* page = c.views[2].p;
-    if (active && page) {
+    if (sounds && page) {
+        setText(page, QUEUE_PAGE_SOUND_STATUS, c.soundStatus, now < c.flashUntil ? c.flash : c.editing ? "TAP A SOUND TO SET ITS KEY" : "TAP A SOUND TO PRESS ITS KEY");
+        setText(page, QUEUE_PAGE_SOUND_EDIT_TEXT, c.soundEditText, c.editing ? "DONE" : "EDIT");
+        for (unsigned i = 0; i < SOUND_PADS; i++) {
+            setText(page, QUEUE_SOUND_TEXTS[i], c.soundText[i], soundLabels[i]);
+            setText(page, QUEUE_SOUND_CAPTIONS[i], c.soundCaption[i], soundNames[i]);
+        }
+    }
+    if (play && page) {
         int state = c.state;
         bool searching = matchmaking(state);
         Queued r = Queued(lastResult.load());
@@ -2523,7 +2601,7 @@ void gate(Context& c, void* cs) {
     unsigned n = at<unsigned short>(cs, 0x10a);
     bool ready = c.views[0].p && c.views[1].p && c.views[2].p;
     U key = U(c.page == Page::Queue) | U(matchmaking(c.state)) << 1 | U(ready) << 2 | U(tabletFault.load()) << 3 | U(c.setup) << 4 |
-            U(n) << 8 | count << 24;
+            U(c.page == Page::Sounds) << 5 | U(n) << 8 | count << 24;
     if (key == c.gateKey) return;
     c.gateKey = key;
     if (count > 8192 || n > count) { failTablet("unexpected native button pool layout"); return; }
@@ -2546,16 +2624,18 @@ void gate(Context& c, void* cs) {
     for (auto& b : buttons) {
         bool hide;
         if (tabletFault) hide = isOurs(b.name);                 // stock buttons back to normal
-        else if (b.name == QUEUE_TAB) hide = !ready;
-        else if (keyFor(b.name)) hide = c.page != Page::Queue || !c.setup;
-        else if (c.setup && c.page == Page::Queue) hide = true;   // the PLAY page's own buttons, under the setup page
+        else if (b.name == QUEUE_TAB || b.name == QUEUE_SOUND_TAB) hide = !ready;
+        else if (keyFor(b.name)) hide = !onOurPage(c) || !c.setup;
+        else if (c.setup && onOurPage(c)) hide = true;   // the page's own buttons, under the setup page
+        else if (b.name == QUEUE_CLOCK) hide = !onOurPage(c);
+        else if (soundPad(b.name) >= 0 || b.name == QUEUE_SOUND_EDIT) hide = c.page != Page::Sounds;
         else if (b.name == QUEUE_START) hide = c.page != Page::Queue || matchmaking(c.state);
         else if (b.name == QUEUE_CANCEL) hide = c.page != Page::Queue || !matchmaking(c.state);
         else if (b.name == QUEUE_LOBBY) hide = c.page != Page::Queue || matchmaking(c.state);
         else if (b.name == QUEUE_PRIVATE) hide = c.page != Page::Queue || matchmaking(c.state);
         else if (b.name == QUEUE_STATS || b.name == QUEUE_GFX_HIGH || b.name == QUEUE_GFX_LOW || b.name == QUEUE_CLIP ||
-                 b.name == QUEUE_CLIP_KEY || b.name == QUEUE_CLOCK) hide = c.page != Page::Queue;
-        else hide = c.page == Page::Queue;                       // stock page content (another mod's page hides it itself)
+                 b.name == QUEUE_CLIP_KEY) hide = c.page != Page::Queue;
+        else hide = onOurPage(c);                                // stock page content (another mod's page hides it itself)
         if (hide && !c.masked.count(b.handle)) {
             if (b.reasons & MASK_BIT) {  // someone else's: it's off already, and theirs to turn back on
                 static std::set<U> warned;
@@ -2692,7 +2772,11 @@ void unload(void* p, U a, U b, U c) {
             if (kind == 2) {
                 ctx.status.clear(), ctx.timer.clear(), ctx.timerCaption.clear(), ctx.statCaption.clear(), ctx.matches.clear();
                 ctx.gfxCaption.clear(), ctx.titleText.clear(), ctx.subtitleText.clear();
-                ctx.clockText.clear(), ctx.clockFormatText.clear();
+                ctx.clockText.clear(), ctx.clockFormatText.clear(), ctx.keyOtherText.clear();
+                ctx.keyCtrlText.clear(), ctx.keyShiftText.clear(), ctx.keyAltText.clear();
+                ctx.soundStatus.clear(), ctx.soundEditText.clear();
+                for (auto& t : ctx.soundText) t.clear();
+                for (auto& t : ctx.soundCaption) t.clear();
                 ctx.modsShown = -1;
                 ctx.searchShown = -1;
                 ctx.gfxShown = -2;
@@ -2703,19 +2787,23 @@ void unload(void* p, U a, U b, U c) {
     unloadOriginal(p, a, b, c);
 }
 
-// The CLIP HOTKEY page, starting from the saved hotkey.
-void openClipSetup(Context& c) {
+// The hotkey keyboard, starting from the saved hotkey of CLIP (slot -1) or that SFX button.
+void openKeySetup(Context& c, int slot) {
     c.setup = true;
+    c.setupSlot = slot;
+    c.naming = false;
+    c.setupChangedAt = GetTickCount64();
+    c.pickFirstUntil = 0;
     c.ctrl = c.shift = c.alt = false;
     c.key.clear();
+    std::string spec = slot < 0 ? clipKeysSpec() : soundKeys[slot];
     Keys keys;
-    if (parseKeys(clipKeysSpec(), keys))
+    if (parseKeys(spec, keys))
         for (WORD vk : keys.vks) {
             if (vk == VK_CONTROL) c.ctrl = true;
             else if (vk == VK_SHIFT) c.shift = true;
             else if (vk == VK_MENU) c.alt = true;
         }
-    std::string spec = clipKeysSpec();
     size_t plus = spec.rfind('+');
     std::string last = spec.substr(plus == std::string::npos ? 0 : plus + 1);
     for (auto& k : QUEUE_KEYS) {
@@ -2723,7 +2811,32 @@ void openClipSetup(Context& c) {
         for (char ch : label) lower += char(tolower(static_cast<unsigned char>(ch)));
         if (lower == last && label != "CTRL" && label != "SHIFT" && label != "ALT") c.key = label;
     }
-    logf("tablet: CLIP HOTKEY page opened");
+    logf("tablet: hotkey page opened (%s %d)", slot < 0 ? "CLIP" : "SFX", slot + 1);
+}
+
+void closeKeySetup(Context& c) {
+    c.setup = c.naming = false;
+    c.setupChangedAt = GetTickCount64();
+}
+
+// Naming an SFX button: letters and digits type, the bottom row is SPACE / DELETE / CLEAR / NO NAME.
+void nameKey(Context& c, const std::string& label) {
+    unsigned pad = unsigned(c.setupSlot);
+    if (label == "CTRL") { if (!c.name.empty() && c.name.back() != ' ' && c.name.size() < 16) c.name += ' '; }
+    else if (label == "SHIFT") { if (!c.name.empty()) c.name.pop_back(); }
+    else if (label == "ALT") c.name.clear();
+    else if (label == "CANCEL") closeKeySetup(c);   // the key's saved already; the name stays as it was
+    else if (label == "SAVE" || label == "NO CLIP APP") {
+        std::string name = label == "SAVE" ? c.name : "";
+        name.erase(name.find_last_not_of(' ') + 1);
+        std::wstring wide(name.begin(), name.end());
+        WritePrivateProfileStringW(L"sounds", (L"name" + std::to_wstring(pad + 1)).c_str(), name.empty() ? nullptr : wide.c_str(), iniPath().c_str());
+        soundNames[pad] = soundName(pad);
+        closeKeySetup(c);
+        c.flash = soundNames[pad] + " SAVED: " + soundLabels[pad];
+        c.flashUntil = GetTickCount64() + 4000;
+        logf("tablet: SFX %u named \"%s\"", pad + 1, name.c_str());
+    } else if (label.size() == 1 && c.name.size() < 16) c.name += label;   // (F1..F12 don't type)
 }
 
 void onEvent(void* gs, U event, U actor, U component, int arg) {
@@ -2737,8 +2850,8 @@ void onEvent(void* gs, U event, U actor, U component, int arg) {
     // A finger still on the tablet sets off the button that replaces the one just pressed (FIND
     // MATCH started a search and CANCEL SEARCH, in its place, stopped it 80 ms later) or its
     // neighbour (LOW 1.3 s after HIGH): another of the page's buttons within a second is ignored.
-    // The keyboard's keys are typed in quick succession, so they're left out.
-    if (isOurs(component) && component != QUEUE_TAB && !keyFor(component)) {
+    // The keyboard's keys and the SFX buttons are tapped in quick succession, so they're left out.
+    if (isOurs(component) && component != QUEUE_TAB && component != QUEUE_SOUND_TAB && !keyFor(component) && soundPad(component) < 0) {
         static U lastAt = 0, lastButton = 0;
         U now = GetTickCount64();
         if (component != lastButton && now - lastAt < 1000) {
@@ -2746,6 +2859,11 @@ void onEvent(void* gs, U event, U actor, U component, int arg) {
             return;
         }
         lastAt = now, lastButton = component;
+    }
+    // Instead, a finger still there when the keyboard opens or closes doesn't press what's underneath.
+    if ((keyFor(component) || soundPad(component) >= 0) && GetTickCount64() - c.setupChangedAt < 400) {
+        logf("tablet: button %016llx ignored (the keyboard just opened or closed)", component);
+        return;
     }
     if (isStockTab(component)) {
         if (c.page == Page::Queue) logf("tablet: left the PLAY page");
@@ -2757,10 +2875,29 @@ void onEvent(void* gs, U event, U actor, U component, int arg) {
         c.sawOther = true;
     } else if (component == QUEUE_TAB) {
         if (c.page != Page::Queue) { logf("tablet: PLAY page selected"); playSound(SOUND_CLICK); }
+        if (c.setup && c.setupSlot >= 0) closeKeySetup(c);   // it was picking an SFX button's key
         static bool asked = false;   // first time this run with no clip key: ask for it
-        if (!asked && clipKeysSpec().empty()) { asked = true; openClipSetup(c); }
+        if (!asked && clipKeysSpec().empty()) { asked = true; openKeySetup(c, -1); }
         if (c.page == Page::Other) kick = Kick{gs, actor, c.stockTab, arg};
         c.page = Page::Queue;
+    } else if (component == QUEUE_SOUND_TAB) {
+        if (c.page != Page::Sounds) { logf("tablet: SFX page selected"); playSound(SOUND_CLICK); c.editing = false; }
+        if (c.setup && c.setupSlot < 0) closeKeySetup(c);    // it was picking CLIP's key
+        if (c.page == Page::Other) kick = Kick{gs, actor, c.stockTab, arg};
+        c.page = Page::Sounds;
+    } else if (component == QUEUE_SOUND_EDIT && c.page == Page::Sounds && !c.setup) {
+        playSound(SOUND_CLICK);
+        c.editing = !c.editing;
+        c.flashUntil = 0;
+    } else if (int pad = c.page == Page::Sounds && !c.setup ? soundPad(component) : -1; pad >= 0) {
+        playSound(SOUND_CLICK);
+        if (c.editing || soundKeys[pad].empty()) openKeySetup(c, pad);
+        else {
+            logf("tablet: SFX %d pressed", pad + 1);
+            c.flash = soundNames[pad] + " - PRESSED " + soundLabels[pad];
+            c.flashUntil = GetTickCount64() + 2000;
+            pressKeys(soundKeys[pad]);
+        }
     } else if (component == QUEUE_START && c.page == Page::Queue) {
         logf("tablet: FIND MATCH pressed (thread %lu)", GetCurrentThreadId());
         playSound(SOUND_CLICK);
@@ -2778,7 +2915,7 @@ void onEvent(void* gs, U event, U actor, U component, int arg) {
         playSound(SOUND_CLICK);
         WritePrivateProfileStringW(L"stats", L"show", std::to_wstring(mode).c_str(), iniPath().c_str());
         logf("tablet: stats box shows %s", STAT_CAPTIONS[mode]);
-    } else if (component == QUEUE_CLOCK && c.page == Page::Queue) {
+    } else if (component == QUEUE_CLOCK && onOurPage(c)) {
         bool twelve = !clock12;
         clock12 = twelve;
         playSound(SOUND_CLICK);
@@ -2798,41 +2935,67 @@ void onEvent(void* gs, U event, U actor, U component, int arg) {
         c.flashUntil = GetTickCount64() + 3000;
         lastResult = int(Queued::None);
         if (!fault) requestQueue("PRIVATE MATCH", true);
-    } else if (const QueueKey* k = c.page == Page::Queue && c.setup ? keyFor(component) : nullptr) {
+    } else if (const QueueKey* k = onOurPage(c) && c.setup ? keyFor(component) : nullptr) {
         playSound(SOUND_CLICK);
         std::string label = k->label;
-        if (label == "CTRL") c.ctrl = !c.ctrl;
+        if (c.naming) nameKey(c, label);
+        else if (label == "CTRL") c.ctrl = !c.ctrl;
         else if (label == "SHIFT") c.shift = !c.shift;
         else if (label == "ALT") c.alt = !c.alt;
-        else if (label == "CANCEL") { c.setup = false; logf("tablet: CLIP HOTKEY cancelled"); }
+        else if (label == "CANCEL") { closeKeySetup(c); logf("tablet: hotkey page cancelled"); }
+        else if (label == "NO CLIP APP" && c.setupSlot >= 0) {   // on an SFX button's keyboard, this key says CLEAR
+            WritePrivateProfileStringW(L"sounds", soundIniKey(c.setupSlot).c_str(), nullptr, iniPath().c_str());
+            setSoundKey(c.setupSlot, "");
+            closeKeySetup(c);
+            c.flash = "SOUND " + std::to_string(c.setupSlot + 1) + " CLEARED";
+            c.flashUntil = GetTickCount64() + 3000;
+            logf("tablet: SFX %d cleared", c.setupSlot + 1);
+        }
         else if (label == "NO CLIP APP") {   // no clipping software: not asked again, CLIP does nothing
             WritePrivateProfileStringW(L"clip", L"keys", L"none", iniPath().c_str());
-            c.setup = false;
+            closeKeySetup(c);
             c.flash = "CLIP OFF - NO CLIP APP (KEY TO SET ONE)";
             c.flashUntil = GetTickCount64() + 4000;
             logf("tablet: no clip app");
         }
         else if (label == "SAVE") {
-            if (c.key.empty()) { c.pickFirstUntil = GetTickCount64() + 2500; return; }
+            if (c.key.empty()) { c.pickMessage = "PICK A KEY, THEN SAVE"; c.pickFirstUntil = GetTickCount64() + 2500; return; }
             std::string spec = std::string(c.ctrl ? "ctrl+" : "") + (c.shift ? "shift+" : "") + (c.alt ? "alt+" : "");
             for (char ch : c.key) spec += char(tolower(static_cast<unsigned char>(ch)));
             std::wstring wide(spec.begin(), spec.end());
-            WritePrivateProfileStringW(L"clip", L"keys", wide.c_str(), iniPath().c_str());
-            c.setup = false;
             Keys keys;
             parseKeys(spec, keys);
-            c.flash = "CLIP HOTKEY SAVED: " + keys.text;
+            if (c.setupSlot >= 0) {
+                // Echo's window gets the press too, and its search hotkey doesn't look at modifiers.
+                if (keys.vks.back() == hotkey) {
+                    c.pickMessage = c.key + " STARTS A SEARCH - PICK ANOTHER";
+                    c.pickFirstUntil = GetTickCount64() + 3000;
+                    return;
+                }
+                WritePrivateProfileStringW(L"sounds", soundIniKey(c.setupSlot).c_str(), wide.c_str(), iniPath().c_str());
+                setSoundKey(c.setupSlot, spec);
+                logf("tablet: hotkey saved (SFX %d): %s", c.setupSlot + 1, spec.c_str());
+                // Then its name, on the same keyboard, starting from the one it has.
+                c.naming = true;
+                c.name = soundNames[c.setupSlot] == "SOUND " + std::to_string(c.setupSlot + 1) ? "" : soundNames[c.setupSlot];
+                c.setupChangedAt = GetTickCount64();
+                return;
+            } else {
+                WritePrivateProfileStringW(L"clip", L"keys", wide.c_str(), iniPath().c_str());
+                c.flash = "CLIP HOTKEY SAVED: " + keys.text;
+            }
+            closeKeySetup(c);
             c.flashUntil = GetTickCount64() + 4000;
-            logf("tablet: CLIP HOTKEY saved: %s", spec.c_str());
+            logf("tablet: hotkey saved (%s %d): %s", c.setupSlot < 0 ? "CLIP" : "SFX", c.setupSlot + 1, spec.c_str());
         } else {
             c.key = label;
         }
     } else if (component == QUEUE_CLIP_KEY && c.page == Page::Queue) {
         playSound(SOUND_CLICK);
-        openClipSetup(c);
+        openKeySetup(c, -1);
     } else if (component == QUEUE_CLIP && c.page == Page::Queue && clipKeysSpec().empty()) {
         playSound(SOUND_CLICK);
-        openClipSetup(c);
+        openKeySetup(c, -1);
     } else if (component == QUEUE_CLIP && c.page == Page::Queue && clipKeysSpec() == "none") {
         playSound(SOUND_CLICK);
         c.flash = "NO CLIP APP - TAP KEY TO PICK ONE";
@@ -2844,7 +3007,7 @@ void onEvent(void* gs, U event, U actor, U component, int arg) {
         std::string spec = clipKeysSpec();
         c.flash = parseKeys(spec, keys) ? "CLIP - PRESSED " + keys.text : "CLIP KEYS NOT SET - SEE ECHOLAZYTABLET.INI";
         c.flashUntil = GetTickCount64() + 3000;
-        if (HANDLE t = CreateThread(nullptr, 0, pressClipKeys, nullptr, 0, nullptr)) CloseHandle(t);
+        pressKeys(spec);
     } else if ((component == QUEUE_GFX_HIGH || component == QUEUE_GFX_LOW) && c.page == Page::Queue) {
         int mode = component == QUEUE_GFX_LOW ? GFX_LOW : GFX_HIGH;
         logf("tablet: GRAPHICS %s pressed", mode == GFX_LOW ? "LOW" : "HIGH");
@@ -3145,7 +3308,7 @@ void install() {
 }  // namespace audioback
 
 void initialize() {
-    logf("EchoLazyTablet v3.16 starting (pid %lu)", GetCurrentProcessId());
+    logf("EchoLazyTablet v3.17 starting (pid %lu)", GetCurrentProcessId());
     graphicsStartup();   // first: Echo reads its settings soon after start
     if (liveTextures()) texlod::loadAll();
     if (!verifyExecutable()) { fault = tabletFault = true; logf("EchoLazyTablet disabled"); return; }

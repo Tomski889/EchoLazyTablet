@@ -9,7 +9,7 @@ returns the resources to add, the layout file the plugin reads, and notes on wha
     overlay canvas of its own, shown by the root's unused stock element 6 (a hidden panel,
     turned into a child-canvas element). Touch areas are appended to the button table;
   * every tab in the tab bar (stock or another mod's: anything tab-sized in the bar strip, with
-    the tab-sized touch area under it) is spread evenly with PLAY first, the touch areas moved
+    the tab-sized touch area under it) is spread evenly with SFX and PLAY first, the touch areas moved
     with their icons;
   * the plugin finds its canvases by element count plus one element's name; for each canvas the
     name is picked so that no other canvas with that many elements has it at that index.
@@ -50,6 +50,14 @@ GFX_LOW_BUTTON = sym('echo_queue_gfx_low_button_v1')
 CLIP_BUTTON = sym('echo_queue_clip_button_v1')
 CLIP_KEY_BUTTON = sym('echo_queue_clip_key_button_v1')    # opens the CLIP HOTKEY page
 CLOCK_BUTTON = sym('echo_queue_clock_format_button_v1')  # the title strip's 12H / 24H switch
+SOUND_TAB_BUTTON = sym('echo_queue_sound_tab_button_v1')  # the SFX tab, next to PLAY
+SOUND_EDIT_BUTTON = sym('echo_queue_sound_edit_button_v1')
+SOUND_PADS = 8                            # the SFX page's buttons, each with its own keybind
+
+
+def sound_button(i):
+    return sym(f'echo_queue_sound_{i}_button_v1')
+
 
 # The CLIP HOTKEY page's keyboard: (label, what the plugin does with it). Its touch areas are
 # echo_queue_key_<label>_v1.
@@ -78,6 +86,9 @@ CLIP = (636 + DX, 198, 790 + DX, 284)            # CLIP: presses the player's cl
 CLIP_KEY = (798 + DX, 198, 878 + DX, 284)        # KEY: sets that keybind
 CLOCK_FORMAT = (732, 48, 816, 100)               # 12H / 24H, in the title strip (overlay pixels)
 KEYBOARD = (4, 106, 1020, 658)                   # the CLIP HOTKEY keyboard: the whole screen under the title strip
+SOUND_EDIT = (760, 20, 960, 98)                  # the SFX page's EDIT / DONE
+SOUND_PAD_W, SOUND_PAD_H, SOUND_PAD_GAP = 224, 186, 14
+SOUND_PAD_ORIGIN = (30, 110)                     # the SFX page's top left button
 OVERLAY_H = 768                                  # (nothing past the tablet's edge is drawn: tried, 25 Oct)
 COLUMNS = (118 + DX, 353 + DX, 589 + DX, 824 + DX)
 ROW_CAPTION, ROW_BOX = (318, 350), (358, 468)
@@ -99,6 +110,7 @@ TAB_IDLE_UV = (0.6904, 0.3645, 0.7393, 0.3937)
 TAB_SELECTED_UV = (0.6899, 0.3297, 0.7393, 0.3595)
 BGRA_TEMPLATE = 0x84b9a06506af66fe        # stock 128x128 B8G8R8A8 texture (header template)
 DXGI_B8G8R8A8_UNORM, DXGI_B8G8R8A8_UNORM_SRGB = 87, 91
+ICON_W, ICON_H = 512, 256
 
 TEAL = (.05, .55, .54, 1)
 TEXT, WHITE, BLACK = (.78, .78, .78, 1), (1, 1, 1, 1), (0, 0, 0, 1)
@@ -176,22 +188,23 @@ def screen_uv(rect):
 
 
 def icon_texture(atlas):
-    """256 x 256: the PLAY tab (idle, selected) and the disc and house glyphs. -> (BGRA bytes, uvs)."""
+    """ICON_W x ICON_H: the PLAY and SFX tabs (idle, selected) and the disc and house glyphs. -> (BGRA bytes, uvs)."""
     from PIL import Image
-    from disc_icon import disc, house
-    tex = Image.new('RGBA', (256, 256), (0, 0, 0, 0))
+    from disc_icon import disc, house, speaker
+    tex = Image.new('RGBA', (ICON_W, ICON_H), (0, 0, 0, 0))
     uvs = {}
-    for col, (key, uv) in enumerate((('tab_idle', TAB_IDLE_UV), ('tab_selected', TAB_SELECTED_UV))):
+    for col, (key, uv, glyph) in enumerate((('tab_idle', TAB_IDLE_UV, disc), ('tab_selected', TAB_SELECTED_UV, disc),
+                                            ('sound_idle', TAB_IDLE_UV, speaker), ('sound_selected', TAB_SELECTED_UV, speaker))):
         frame = tab_frame(atlas, uv)
         w, h = frame.size
-        g = disc(round(h * .66))
+        g = glyph(round(h * .66))
         frame.alpha_composite(g, ((w - g.width) // 2, (h - g.height) // 2))
         tex.paste(frame, (col * 128, 0))
-        uvs[key] = (col * 128 / 256, 0, (col * 128 + w) / 256, h / 256)
+        uvs[key] = (col * 128 / ICON_W, 0, (col * 128 + w) / ICON_W, h / ICON_H)
     tex.alpha_composite(disc(120), (4, 132))
-    uvs['disc'] = (4 / 256, 132 / 256, 124 / 256, 252 / 256)
+    uvs['disc'] = (4 / ICON_W, 132 / ICON_H, 124 / ICON_W, 252 / ICON_H)
     tex.alpha_composite(house(120), (132, 132))
-    uvs['house'] = (132 / 256, 132 / 256, 252 / 256, 252 / 256)
+    uvs['house'] = (132 / ICON_W, 132 / ICON_H, 252 / ICON_W, 252 / ICON_H)
     r, g, b, a = tex.split()
     return Image.merge('RGBA', (b, g, r, a)).tobytes(), uvs
 
@@ -313,7 +326,7 @@ def build(m):
     text_template, panel_template = donor.elements[1], donor.elements[0]
     sprite_template = nav.elements[0]
 
-    # Tabs: PLAY first, then every tab already there in its current order.
+    # Tabs: SFX and PLAY first, then every tab already there in its current order.
     tabs = find_tabs(nav, buttons)
     stock_found = [t for t in tabs if t['stock']]
     if len(stock_found) != 4 or any(len(t['rows']) != 1 for t in stock_found):
@@ -331,8 +344,8 @@ def build(m):
                         'It keeps working: EchoLazyTablet only moves its tabs along to make room.')
     elif details:
         notes.insert(0, 'Another mod has changed your tablet. EchoLazyTablet builds around it and leaves it as it is.')
-    centers = tab_centers(len(tabs) + 1)
-    for t, new in zip(tabs, centers[1:]):
+    centers = tab_centers(len(tabs) + 2)
+    for t, new in zip(tabs, centers[2:]):
         dx = new - t['center']
         for i in t['elements']:
             x0, y0, x1, y1 = Canvas.rect(nav.elements[i])
@@ -343,8 +356,10 @@ def build(m):
             buttons.rows[r] = bytes(row)
     atlas = atlas_image(m)
     icon_pixels, icon_uvs = icon_texture(atlas)
-    c = centers[0]
+    c = centers[1]
     tab_rect = (c - TAB_SIZE / 2, BAR_Y[0], c + TAB_SIZE / 2, BAR_Y[1])
+    c = centers[0]
+    sound_tab_rect = (c - TAB_SIZE / 2, BAR_Y[0], c + TAB_SIZE / 2, BAR_Y[1])
 
     # Everything EchoLazyTablet shows is one overlay canvas covering the tablet, shown by the root's
     # unused element 6, so no canvas another mod checks changes its element count. The PLAY
@@ -458,7 +473,7 @@ def build(m):
         if toggle:   # lit while that modifier is on
             e[f'mod_{n}'] = lit = sprite(f'echo_queue_key_{n}_on_v1', rect, CARD_ACTIVE_UV, WHITE, hidden=True)
             sprite(f'echo_queue_key_{n}_on_fill_v1', (4, 4, w - 4, h - 4), ROW_FILL_UV, (*FIND_FILL[:3], .7), parent=lit, texture=ROW_ATLAS)
-        text(f'echo_queue_key_{n}_text_v1', label, rect, size, WHITE)
+        e[f'key_{n}_text'] = text(f'echo_queue_key_{n}_text_v1', label, rect, size, WHITE)
         key_rects[label] = rect
 
     for r, labels in enumerate(KEYBOARD_ROWS):
@@ -474,6 +489,24 @@ def build(m):
     key('CANCEL', (kw - 160, y0, kw - 16, y0 + kh), 32, fill=CANCEL_FILL)
     key_rects = {k: (r[0] + KEYBOARD[0], r[1] + KEYBOARD[1], r[2] + KEYBOARD[0], r[3] + KEYBOARD[1]) for k, r in key_rects.items()}
 
+    # The SFX page: its own tab, eight buttons that each press their own keybind (for soundboards).
+    # EDIT, or tapping an empty one, picks the keybind on the keyboard above.
+    group = e['sound_page'] = sprite('echo_queue_sound_page_v1', (PAGE_X, PAGE_Y, PAGE_X + PAGE_W, PAGE_Y + PAGE_H),
+                                     screen_uv((PAGE_X, PAGE_Y, PAGE_X + PAGE_W, PAGE_Y + PAGE_H)), WHITE, parent=-1, hidden=True)
+    sprite('echo_queue_sound_card_v1', CARD, CARD_UV, WHITE)
+    e['sound_status'] = text('echo_queue_sound_status_v1', 'TAP A SOUND TO PRESS ITS KEY', (44, 20, 740, 98), 28, TEXT, align=0, capacity=96)
+    _, e['sound_edit_text'] = lobby_row('echo_queue_sound_edit_row_v1', SOUND_EDIT, CLIP_FILL, CLIP_BORDER, 'EDIT', size=36)
+    sound_rects = []
+    for i in range(SOUND_PADS):
+        x0 = SOUND_PAD_ORIGIN[0] + i % 4 * (SOUND_PAD_W + SOUND_PAD_GAP)
+        y0 = SOUND_PAD_ORIGIN[1] + i // 4 * (SOUND_PAD_H + SOUND_PAD_GAP)
+        rect = (x0, y0, x0 + SOUND_PAD_W, y0 + SOUND_PAD_H)
+        box = sprite(f'echo_queue_sound_{i}_box_v1', rect, CARD_ACTIVE_UV, WHITE)
+        sprite(f'echo_queue_sound_{i}_fill_v1', (6, 6, SOUND_PAD_W - 6, SOUND_PAD_H - 6), ROW_FILL_UV, (*FIND_FILL[:3], .55), parent=box, texture=ROW_ATLAS)
+        e[f'sound_caption_{i}'] = text(f'echo_queue_sound_{i}_caption_v1', f'SOUND {i + 1}', (x0, y0 + 14, x0 + SOUND_PAD_W, y0 + 64), 24, ACCENT)
+        e[f'sound_text_{i}'] = text(f'echo_queue_sound_{i}_text_v1', 'TAP TO SET', (x0 + 6, y0 + 64, x0 + SOUND_PAD_W - 6, y0 + SOUND_PAD_H - 14), 26, WHITE)
+        sound_rects.append(rect)
+
     # The title strip (a cover over the stock title, PLAY's own title) and the tab, top level.
     group = -1
     title_area = (54, 22, 822, 103)
@@ -488,6 +521,8 @@ def build(m):
     clock_format_text = text('echo_queue_clock_format_text_v1', '24H', CLOCK_FORMAT, 26, WHITE, hidden=True, capacity=8)
     tab_icon = sprite('echo_queue_tab_icon_v1', tab_rect, icon_uvs['tab_idle'], WHITE, texture=ICON_TEXTURE)
     tab_selected = sprite('echo_queue_tab_selected_v1', tab_rect, icon_uvs['tab_selected'], WHITE, hidden=True, texture=ICON_TEXTURE)
+    sound_tab_icon = sprite('echo_queue_sound_tab_icon_v1', sound_tab_rect, icon_uvs['sound_idle'], WHITE, texture=ICON_TEXTURE)
+    sound_tab_selected = sprite('echo_queue_sound_tab_selected_v1', sound_tab_rect, icon_uvs['sound_selected'], WHITE, hidden=True, texture=ICON_TEXTURE)
 
     # The root's element 6 (stock: a hidden 96 px panel above the tablet, unused) becomes the
     # overlay's child-canvas element; it keeps its name and index (VR-tested 23 Oct).
@@ -538,15 +573,20 @@ def build(m):
     add_button(GFX_HIGH_BUTTON, gfx_rects['gfx_high'])
     add_button(GFX_LOW_BUTTON, gfx_rects['gfx_low'])
     add_button(CLOCK_BUTTON, CLOCK_FORMAT, on_page=False)
+    add_button(SOUND_TAB_BUTTON, sound_tab_rect, on_page=False)
+    add_button(SOUND_EDIT_BUTTON, SOUND_EDIT)
+    for i, rect in enumerate(sound_rects):
+        add_button(sound_button(i), rect)
     moved_rows = {r for t in tabs for r in t['rows']}
     for r, old in enumerate(old_rows):
         assert r in moved_rows or buttons.rows[r] == old
 
-    icon_cpu, icon_gpu = texture_pair(m, 256, 256, icon_pixels)
+    icon_cpu, icon_gpu = texture_pair(m, ICON_W, ICON_H, icon_pixels)
     resources = [(CV, ROOT_CANVAS, root.serialize()), (CV, NAV_CANVAS, nav.serialize()), (CV, OVERLAY, page.serialize()),
                  (BUTTONS, LEVEL, buttons.serialize()), (TEX, ICON_TEXTURE, icon_cpu), (TEX_GPU, ICON_TEXTURE, icon_gpu)]
     e.update(page=page_group, cover=cover, header=header, title=title, subtitle=subtitle, clock=clock, clock_format=clock_format,
-             clock_format_text=clock_format_text, tab_icon=tab_icon, tab_selected=tab_selected)
+             clock_format_text=clock_format_text, tab_icon=tab_icon, tab_selected=tab_selected,
+             sound_tab_icon=sound_tab_icon, sound_tab_selected=sound_tab_selected)
 
     # How the plugin will recognise each canvas, given every canvas in the game after this build.
     final = {}
@@ -568,7 +608,7 @@ def build(m):
     layout = dict(version=2, canvases=[markers[n] for n in kinds], root_slot=ROOT_SLOT,
                   nav_stock_selected=hide_selected, nav_other_selected=others_selected, other_tabs=other_tabs,
                   overlay_elements=len(page.elements))
-    return dict(resources=resources, layout=layout, notes=notes, details=details, page=e, tabs=len(tabs) + 1)
+    return dict(resources=resources, layout=layout, notes=notes, details=details, page=e, tabs=len(tabs) + 2)
 
 
 def texture_image(cpu, gpu):
@@ -634,6 +674,8 @@ def tab_preview(m, built):
     tabs = [(t['center'], describe(nav, [nav.elements[i] for i in t['elements']], stock=t['stock'])) for t in find_tabs(nav, buttons)]
     x0, _, x1, _ = Canvas.rect(overlay.elements[built['page']['tab_icon']])
     tabs.append(((x0 + x1) / 2, describe(overlay, [overlay.elements[built['page']['tab_icon']]], ours=True)))
+    x0, _, x1, _ = Canvas.rect(overlay.elements[built['page']['sound_tab_icon']])
+    tabs.append(((x0 + x1) / 2, dict(describe(overlay, [overlay.elements[built['page']['sound_tab_icon']]], ours=True), sound=True)))
     return [d for _, d in sorted(tabs, key=lambda t: t[0])]
 
 
@@ -658,9 +700,14 @@ def page_header(built):
     return ('// Generated by installer/tablet.py -- do not edit.\n#pragma once\n#include <cstdint>\n'
             f'constexpr uint64_t QUEUE_TAB=0x{TAB_BUTTON:016x}, QUEUE_START=0x{START_BUTTON:016x}, '
             f'QUEUE_CANCEL=0x{CANCEL_BUTTON:016x}, QUEUE_LOBBY=0x{LOBBY_BUTTON:016x}, QUEUE_PRIVATE=0x{PRIVATE_BUTTON:016x}, '
-            f'QUEUE_STATS=0x{STATS_BUTTON:016x}, QUEUE_GFX_HIGH=0x{GFX_HIGH_BUTTON:016x}, QUEUE_GFX_LOW=0x{GFX_LOW_BUTTON:016x}, QUEUE_CLIP=0x{CLIP_BUTTON:016x}, QUEUE_CLIP_KEY=0x{CLIP_KEY_BUTTON:016x}, QUEUE_CLOCK=0x{CLOCK_BUTTON:016x};\n'
+            f'QUEUE_STATS=0x{STATS_BUTTON:016x}, QUEUE_GFX_HIGH=0x{GFX_HIGH_BUTTON:016x}, QUEUE_GFX_LOW=0x{GFX_LOW_BUTTON:016x}, QUEUE_CLIP=0x{CLIP_BUTTON:016x}, QUEUE_CLIP_KEY=0x{CLIP_KEY_BUTTON:016x}, QUEUE_CLOCK=0x{CLOCK_BUTTON:016x}, '
+            f'QUEUE_SOUND_TAB=0x{SOUND_TAB_BUTTON:016x}, QUEUE_SOUND_EDIT=0x{SOUND_EDIT_BUTTON:016x};\n'
+            'constexpr uint64_t QUEUE_SOUND_BUTTONS[] = {' + ', '.join(f'0x{sound_button(i):016x}' for i in range(SOUND_PADS)) + '};\n'
+            'constexpr unsigned QUEUE_SOUND_TEXTS[] = {' + ', '.join(str(e[f'sound_text_{i}']) for i in range(SOUND_PADS)) + '};\n'
+            'constexpr unsigned QUEUE_SOUND_CAPTIONS[] = {' + ', '.join(str(e[f'sound_caption_{i}']) for i in range(SOUND_PADS)) + '};\n'
             f"constexpr unsigned QUEUE_OVERLAY_ELEMENTS={built['layout']['overlay_elements']}, QUEUE_LAYOUT_VERSION={built['layout']['version']};\n"
-            + ''.join(f'constexpr unsigned QUEUE_PAGE_{k.upper()}={v};\n' for k, v in e.items())
+            + ''.join(f'constexpr unsigned QUEUE_PAGE_{k.upper()}={v};\n' for k, v in e.items()
+                      if not k.startswith('key_') or k in ('key_no_clip_app_text', 'key_ctrl_text', 'key_shift_text', 'key_alt_text'))
             + 'struct QueueKey { uint64_t name; const char* label; };\nconstexpr QueueKey QUEUE_KEYS[] = {'
             + ', '.join(f'{{0x{key_button(k):016x}, "{k}"}}' for k in [k for row in KEYBOARD_ROWS for k in row] + list(KEYBOARD_EXTRA))
             + '};\n')

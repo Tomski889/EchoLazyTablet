@@ -1,7 +1,7 @@
-EchoLazyTablet 3.16 - Echo Arena matchmaking from your hand tablet (Echo VR, EchoVRCE)
+EchoLazyTablet 3.17 - Echo Arena matchmaking from your hand tablet (Echo VR, EchoVRCE)
 
 What it does
-  A PLAY tab, first on the hand tablet's tab bar:
+  A PLAY tab, second on the hand tablet's tab bar (after SFX, below):
   * FIND MATCH queues for a public Echo Arena match (CANCEL SEARCH while searching, with a
     queue timer) and joins it when one is found. F9 in Echo's window does the same.
   * PRIVATE MATCH creates a private Echo Arena match on the game server with your lowest ping
@@ -19,6 +19,10 @@ What it does
   * Sound output back when Echo closes: set [audio] after_echo in EchoLazyTablet.ini to your speakers'
     name, and Windows switches back to them from the headset.
   * Joining or leaving fades the headset to black (after [fade] delay_ms).
+  An SFX tab, first on the tab bar: eight buttons that each press a key you pick, for Voicemod and other
+  soundboards. Bind a sound to a key in your soundboard, then tap an empty button (or EDIT, then a
+  button) and pick the same key on the tablet, then type a name for it (or NO NAME). They're kept as
+  [sounds] key1 to key8 and name1 to name8 in EchoLazyTablet.ini.
   In a public match, FIND MATCH and PRIVATE MATCH wait until the match is over (no leaving your
   team mid-game); private matches and the lobby are fine.
   Needs Echo VR build 1683152886 and EchoLoader. On any other build it switches itself off and
@@ -33,7 +37,7 @@ Installing (players)
     installer names EchoLazyTablet (on) in every Echo Mods profile. If Echo Mods rebuilds the lobby from an
     older snapshot, the window says so: run Repair afterwards.
   * Other tablet mods: EchoLazyTablet builds its tab on top of whatever is on the tablet. Every tab
-    already there (stock or another mod's) is kept and spread evenly with PLAY first; their touch
+    already there (stock or another mod's) is kept and spread evenly with SFX and PLAY first; their touch
     areas move with them. Up to 8 tabs fit.
   * If another mod's installer rewrites the tablet later, the PLAY tab disappears: run Repair.
   * EchoLazyTablet never changes the element counts of the tablet canvases other mods use to find the
