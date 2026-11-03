@@ -85,7 +85,7 @@ SCALE = .3 / 1024                         # touch areas are in metres
 CARD = (2, 8, PAGE_W - 2, 520)
 # The PLAY page, on one grid: everything between x 28 and 972, rows 16 px apart.
 MODE_TILE = (28, 22, 148, 142)
-TIME = (436, 22, 636, 142)                      # the clock's card, beside the mode; right of it is free (tap: 12 / 24 hour)
+TIME = (500, 22, 700, 142)                      # the clock's card, beside the mode; right of it is free (tap: 12 / 24 hour)
 BUTTON = (28, 166, 632, 250)                    # FIND MATCH / CANCEL SEARCH
 CLIP = (648, 166, 852, 250)                     # CLIP: presses the player's clip keybind
 CLIP_KEY = (868, 166, 972, 250)                 # KEY: sets that keybind
@@ -403,9 +403,9 @@ def build(m):
     tile = sprite('echo_queue_mode_tile_v1', MODE_TILE, TILE_UV, TEAL)
     tw = MODE_TILE[2] - MODE_TILE[0]
     sprite('echo_queue_mode_icon_v1', (16, 16, tw - 16, tw - 16), icon_uvs['disc'], WHITE, parent=tile, texture=ICON_TEXTURE)
-    text('echo_queue_title_text_v1', 'ECHO ARENA', (168, 24, 580, 76), 50, WHITE, align=0)
+    text('echo_queue_title_text_v1', 'ECHO ARENA', (168, 24, 488, 76), 50, WHITE, align=0)
     text('echo_queue_mode_text_v1', 'PUBLIC MATCH', (170, 76, 580, 104), 24, ACCENT, align=0)
-    e['status'] = text('echo_queue_status_v1', 'TAP FIND MATCH TO QUEUE', (170, 106, 426, 140), 22, TEXT, align=0, capacity=96)
+    e['status'] = text('echo_queue_status_v1', 'TAP FIND MATCH TO QUEUE', (170, 106, 488, 140), 22, TEXT, align=0, capacity=96)
     sprite('echo_queue_play_clock_base_v1', TIME, CARD_UV, WHITE)
     clock_box = sprite('echo_queue_play_clock_box_v1', TIME, CARD_ACTIVE_UV, WHITE)
     sprite('echo_queue_play_clock_fill_v1', (6, 6, TIME[2] - TIME[0] - 6, TIME[3] - TIME[1] - 6), ROW_FILL_UV, (*FIND_FILL[:3], .55),
@@ -559,9 +559,9 @@ def build(m):
     colour(page, subtitle_box, GREY)
     subtitle_box_wide = page.append(panel_template, 'echo_queue_subtitle_box_wide_v1', (226, 48, 816, 100), hidden=True)
     colour(page, subtitle_box_wide, GREY)
-    # PLAY's status (READY, or the queue timer while searching) in the strip's top right corner.
-    e['timer_caption'] = text('echo_queue_timer_caption_v1', 'STATUS', (700, 48, 852, 100), 18, ACCENT, align=1, hidden=True, capacity=24)
-    e['timer'] = text('echo_queue_timer_v1', 'READY', (864, 40, 990, 108), 32, WHITE, align=0, hidden=True, capacity=16)
+    # PLAY's status (READY, or the queue timer while searching) in the strip's top right corner, left of the stock close button.
+    e['timer_caption'] = text('echo_queue_timer_caption_v1', 'STATUS', (580, 48, 702, 100), 18, ACCENT, align=1, hidden=True, capacity=24)
+    e['timer'] = text('echo_queue_timer_v1', 'READY', (714, 40, 840, 108), 32, WHITE, align=0, hidden=True, capacity=16)
     subtitle = text('echo_queue_subtitle_v1', 'ARENA MATCHMAKING', (242, 40, 810, 108), 30, WHITE, align=0, hidden=True, capacity=64)
     # The clock at the strip's right end, and the 12H / 24H switch next to it (it names the format shown).
     clock = text('echo_queue_clock_v1', '00:00', (560, 40, 722, 108), 36, WHITE, align=1, hidden=True, capacity=16)

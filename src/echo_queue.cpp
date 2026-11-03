@@ -1763,7 +1763,7 @@ DWORD WINAPI playersWatch(LPVOID) {
 // sends the account's ID and display name from the saved profile (xplatformid, displayname)
 // and gets back blocked or not. The answer is kept in EchoLazyTablet.ini ([access] blocked) for
 // when the service can't be reached; with no answer ever, EchoLazyTablet stays on.
-constexpr const char* ECHOQUEUE_VERSION = "3.18";
+constexpr const char* ECHOQUEUE_VERSION = "3.19";
 constexpr const wchar_t* ACCESS_HOST = L"echoqueue.dokuyegar.workers.dev";  // the deployed Worker (server/worker.js)
 constexpr U ACCESS_EVERY_MS = 15 * 60 * 1000;
 
@@ -3361,7 +3361,7 @@ void install() {
 }  // namespace audioback
 
 void initialize() {
-    logf("EchoLazyTablet v3.18 starting (pid %lu)", GetCurrentProcessId());
+    logf("EchoLazyTablet v3.19 starting (pid %lu)", GetCurrentProcessId());
     graphicsStartup();   // first: Echo reads its settings soon after start
     if (liveTextures()) texlod::loadAll();
     if (!verifyExecutable()) { fault = tabletFault = true; logf("EchoLazyTablet disabled"); return; }
