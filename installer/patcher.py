@@ -22,7 +22,7 @@ import echodata as E
 import graphics
 import tablet
 
-VERSION = '3.21'
+VERSION = '3.22'
 EXE_TIMESTAMP = 1683152886
 DATA = Path('_data/5932408047/rad15/win10')
 STOCK_PACKAGES = 3
@@ -509,6 +509,17 @@ def _plain(fn):
     return wrapped
 
 
+def fill_gaps(game, m, log=print):
+    """Echo opens every package file up to the manifest's count and won't load ("Unknown error while
+    loading the game") if one is missing. Installers before 3.22 could delete the LOW graphics package
+    after another tool had added one past it: an empty file puts the slot back."""
+    for n in range(m.packages):
+        path = game.packages / f'{E.MID}_{n}'
+        if not path.exists() and not any(f[0] == n and f[2] for f in m.frames):
+            _replace(path, b'')
+            log(f'Package _{n} was missing (Echo VR would not load): put an empty one back.')
+
+
 @_plain
 def install(game, log=print, stage=_no_stage):
     """Install, or repair: EchoLazyTablet out, then the tab rebuilt on the tablet as it is now.
@@ -525,6 +536,7 @@ def install(game, log=print, stage=_no_stage):
     was_low = graphics.is_low(game.folder)
     graphics.undo(game.folder, log, keep_ini=True)
     m, old, unused = without_echoqueue(game)
+    fill_gaps(game, m, log)
     if old is not None:
         log(f'Took the existing EchoLazyTablet out of the tablet data (package _{old}).')
     stage('build')
@@ -617,6 +629,7 @@ def uninstall(game, log=print, stage=_no_stage):
         raise InstallError('Echo VR is running. Close it first.')
     graphics.undo(game.folder, log)
     m, n, unused = without_echoqueue(game)
+    fill_gaps(game, m, log)
     stage('write')
     if n is not None:
         _write_game_data(game, m)

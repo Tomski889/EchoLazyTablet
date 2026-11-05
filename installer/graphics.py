@@ -298,9 +298,16 @@ def undo(game, log=print, keep_ini=False):
     if not high_path.exists():
         return False
     info = json.loads(record.read_text()) if record.exists() else {}
-    write_atomic(man, high_path.read_bytes())
+    restored = high_path.read_bytes()
+    write_atomic(man, restored)
     if 'package' in info:
-        (data / 'packages' / f'{E.MID}_{info["package"]}').unlink(missing_ok=True)
+        package = data / 'packages' / f'{E.MID}_{info["package"]}'
+        # Echo opens every package up to the manifest's count: if another tool has added one after
+        # ours since, our slot must stay (empty) or Echo won't load ("Unknown error while loading").
+        if package.exists() and info['package'] < E.Manifest(restored).packages - 1:
+            write_atomic(package, b'')
+        else:
+            package.unlink(missing_ok=True)
     for path in (record, high_path, low_path, man.with_name(E.MID + '.potato-backup')):
         path.unlink(missing_ok=True)
     high = read_ini(ini_path(game)).get('high')

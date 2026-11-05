@@ -1,4 +1,4 @@
-EchoLazyTablet 3.21 - Echo Arena and Echo Combat matchmaking from your hand tablet (Echo VR, EchoVRCE)
+EchoLazyTablet 3.22 - Echo Arena and Echo Combat matchmaking from your hand tablet (Echo VR, EchoVRCE)
 
 What it does
   A PLAY tab, second on the hand tablet's tab bar (after SFX, below):
@@ -55,6 +55,8 @@ Installing (players)
   * Echo Arcade (and mods like it) only install onto a stock tablet: install them first, then
     EchoLazyTablet. Their uninstall puts their saved tablet back, which drops the PLAY tab: run
     Repair afterwards.
+  * "Unknown error while loading the game" after updating EchoLazyTablet with another mod tool also
+    installed: run this installer's Repair (3.22 and later put back the missing package file).
   * Uninstall puts back exactly what EchoLazyTablet replaced (stock data, or another mod's version)
     and keeps your settings.
   * Before each change the manifest is copied to manifests\48037dc70b0ecab2.echoqueue-backup.
