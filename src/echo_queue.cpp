@@ -38,6 +38,7 @@
 #include "generated/queue_tab.h"
 #include <windows.h>
 #include <winhttp.h>
+#include <shellapi.h>
 // D3D12 methods returning structs (GetCPUDescriptorHandleForHeapStart) use a hidden return
 // pointer in Microsoft's ABI; this makes mingw's d3d12.h declare them that way.
 #define WIDL_EXPLICIT_AGGREGATE_RETURNS
@@ -106,7 +107,7 @@ constexpr INTERNET_PORT API_PORT = 6721;
 constexpr unsigned RVA_LOADED = 0x71fc90, RVA_UNLOAD = 0x7287b0, RVA_SHOW = 0x71c820, RVA_TEXT = 0x727f10,
                    RVA_ALPHA = 0x726f00, RVA_BUTTON_UPDATE = 0x92f3f0, RVA_BUTTON_DISABLE = 0x92b9e0,
                    RVA_BUTTON_ENABLE = 0x92bd10, RVA_DISPATCH = 0x510060;
-constexpr U ECHO_ARENA = 0xcb60a4de7e1caf73, NONE = ~0ull;
+constexpr U ECHO_ARENA = 0xcb60a4de7e1caf73, ECHO_COMBAT = 0x3d5c3976578a321a, NONE = ~0ull;  // echo_arena, echo_combat
 constexpr U ECHO_ARENA_PRIVATE = 0x09990965f4db8c03, MPL_ARENA_A = 0x576ed3f8428ebc4b;  // echo_arena_private, its arena
 // Sounds: Wwise is linked into echovr.exe, which exports AK::SoundEngine::PostEvent(eventID,
 // gameObject, ...) at 0x138f240. Stock tablet buttons get their sounds from the tablet's
@@ -259,6 +260,7 @@ std::atomic<U> fadeDelayMs{FADE_DELAY_MS};  // button to black ([fade] delay_ms)
 // Our searches must also be joined (the menu's JoinFoundMatch step); see joinTick.
 std::atomic<bool> ourSearch{false};
 std::atomic<bool> ourPrivate{false};  // ...and it's a private match we're creating
+std::atomic<bool> ourCombat{false};   // ...and it's an Echo Combat search
 std::atomic<U> searchSince{0};      // when the current search started (for the page's timer)
 std::atomic<U> joinQueuedSince{0};
 std::atomic<U> secondsToday{0};      // time played today (see updateToday), for the page
@@ -443,7 +445,7 @@ void findDetour(void* netgame, FindParams* p) {
                  window ? GetWindowThreadProcessId(window, nullptr) : 0);
         describe("game asked for a match", netgame, p);
         ourSearch = false;  // the menu's own search: the menu joins it
-        searchKind = p->gametype == ECHO_ARENA && p->access == 0 ? KIND_PUBLIC : KIND_OTHER;
+        searchKind = (p->gametype == ECHO_ARENA || p->gametype == ECHO_COMBAT) && p->access == 0 ? KIND_PUBLIC : KIND_OTHER;
         if (p->gametype == ECHO_ARENA && p->access == 0) {
             captured = *p;
             haveCaptured = true;
@@ -578,7 +580,8 @@ bool createOnServer(void* netgame, int index) {
 // its own requests there, and the net game only takes them there. Tablet presses and the
 // tablet update arrive on worker threads, so they post a message instead of calling this.
 // `createPrivate`: create a private match instead of searching for a public one.
-Queued queueNow(bool createPrivate = false) {
+// `combat`: a public Echo Combat match instead of Echo Arena.
+Queued queueNow(bool createPrivate = false, bool combat = false) {
     DWORD thread = GetCurrentThreadId();
     if (accessBlocked) { logf("queue: EchoLazyTablet is turned off for this account"); return Queued::Blocked; }
     if (gameThread != 0 && gameThread != thread) { logf("queue: thread %lu isn't the game's thread %lu; not queueing (send this log)", thread, DWORD(gameThread)); return Queued::WrongThread; }
@@ -602,11 +605,13 @@ Queued queueNow(bool createPrivate = false) {
         }
     } else {
         FindParams p = arenaRequest();
-        describe("queue: asking for a match", netgame, &p);
+        if (combat) p.gametype = ECHO_COMBAT;  // what the menu asks for Combat: the same, but echo_combat
+        describe(combat ? "queue: asking for an Echo Combat match" : "queue: asking for a match", netgame, &p);
         findOriginal(netgame, &p);
     }
     ourSearch = true;
     ourPrivate = createPrivate;
+    ourCombat = !createPrivate && combat;
     return Queued::Started;
 }
 
@@ -635,10 +640,10 @@ std::atomic<U> lastResultAt{0};
 
 // From any thread: ask Echo's window thread to queue, or to create a private match
 // (handled in windowDetour).
-void requestQueue(const char* why, bool createPrivate = false) {
+void requestQueue(const char* why, bool createPrivate = false, bool combat = false) {
     if (!window || !windowOriginal) { logf("queue (%s): Echo's window isn't hooked; can't queue", why); lastResult = int(Queued::NotReady); lastResultAt = GetTickCount64(); return; }
     logf("queue (%s): asking Echo's window thread", why);
-    PostMessageW(window, createPrivate ? WM_PRIVATE : WM_QUEUE, 0, 0);
+    PostMessageW(window, createPrivate ? WM_PRIVATE : WM_QUEUE, combat, 0);
 }
 
 // ---- screen fade ----
@@ -1763,7 +1768,7 @@ DWORD WINAPI playersWatch(LPVOID) {
 // sends the account's ID and display name from the saved profile (xplatformid, displayname)
 // and gets back blocked or not. The answer is kept in EchoLazyTablet.ini ([access] blocked) for
 // when the service can't be reached; with no answer ever, EchoLazyTablet stays on.
-constexpr const char* ECHOQUEUE_VERSION = "3.20";
+constexpr const char* ECHOQUEUE_VERSION = "3.21";
 constexpr const wchar_t* ACCESS_HOST = L"echoqueue.dokuyegar.workers.dev";  // the deployed Worker (server/worker.js)
 constexpr U ACCESS_EVERY_MS = 15 * 60 * 1000;
 
@@ -1818,6 +1823,71 @@ bool readIdentity(std::string& id, std::string& name) {
     id = jsonString(profile, "xplatformid");
     name = jsonString(profile, "displayname");
     return !id.empty() && !name.empty();
+}
+
+// A newer EchoLazyTablet on GitHub: on its own thread, shortly after Echo starts and every 6 hours,
+// the latest release's tag (vX.Y) is compared with this version. The PLAY page says so when idle.
+constexpr const wchar_t* RELEASES_HOST = L"api.github.com";
+constexpr const wchar_t* RELEASES_PATH = L"/repos/Tomski889/EchoLazyTablet/releases/latest";
+std::mutex updateMutex;
+std::string updateVersion;   // the newer version ("3.22"), empty when up to date or unknown
+
+// "3.21" (or "v3.21") as major * 1000 + minor; -1 if it isn't one.
+int versionNumber(const std::string& v) {
+    int major = 0, minor = 0;
+    return sscanf(v.c_str() + (!v.empty() && (v[0] == 'v' || v[0] == 'V')), "%d.%d", &major, &minor) == 2 ? major * 1000 + minor : -1;
+}
+
+std::string latestRelease() {
+    HINTERNET session = WinHttpOpen(L"EchoLazyTablet", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+    if (!session) return {};
+    WinHttpSetTimeouts(session, 5000, 5000, 5000, 10000);
+    HINTERNET connection = WinHttpConnect(session, RELEASES_HOST, INTERNET_DEFAULT_HTTPS_PORT, 0);
+    HINTERNET request = connection ? WinHttpOpenRequest(connection, L"GET", RELEASES_PATH, nullptr, WINHTTP_NO_REFERER,
+                                                        WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE) : nullptr;
+    DWORD status = 0, size = sizeof status;
+    std::string body;
+    if (request && WinHttpSendRequest(request, L"Accept: application/vnd.github+json\r\n", DWORD(-1), nullptr, 0, 0, 0) &&
+        WinHttpReceiveResponse(request, nullptr) &&
+        WinHttpQueryHeaders(request, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_HEADER_NAME_BY_INDEX, &status, &size, WINHTTP_NO_HEADER_INDEX) &&
+        status == 200) {
+        char buffer[4096];
+        DWORD read = 0;
+        while (body.size() < 262144 && WinHttpReadData(request, buffer, sizeof buffer, &read) && read) body.append(buffer, read);
+    }
+    if (request) WinHttpCloseHandle(request);
+    if (connection) WinHttpCloseHandle(connection);
+    WinHttpCloseHandle(session);
+    std::string tag = jsonString(body, "tag_name");
+    if (tag.empty()) logf("update: no answer from GitHub (HTTP %lu)", status);
+    return tag;
+}
+
+DWORD WINAPI updateWatch(LPVOID) {
+    Sleep(30000);
+    for (;;) {
+        std::string tag = latestRelease();
+        if (versionNumber(tag) > versionNumber(ECHOQUEUE_VERSION)) {
+            std::string v = tag.substr(tag[0] == 'v' || tag[0] == 'V');
+            std::lock_guard<std::mutex> lock(updateMutex);
+            if (updateVersion != v) logf("update: EchoLazyTablet %s is out (this is %s)", v.c_str(), ECHOQUEUE_VERSION);
+            updateVersion = v;
+        }
+        Sleep(6 * 60 * 60 * 1000);
+    }
+}
+
+// The latest release's page in the default browser (on the PC's desktop), off the game's thread.
+void openLatestRelease() {
+    if (HANDLE t = CreateThread(nullptr, 0, [](LPVOID) -> DWORD {
+            ShellExecuteW(nullptr, L"open", L"https://github.com/Tomski889/EchoLazyTablet/releases/latest", nullptr, nullptr, SW_SHOWNORMAL);
+            return 0;
+        }, nullptr, 0, nullptr)) CloseHandle(t);
+}
+
+std::string updateAvailable() {
+    std::lock_guard<std::mutex> lock(updateMutex);
+    return updateVersion;
 }
 
 DWORD WINAPI accessWatch(LPVOID) {
@@ -2000,6 +2070,8 @@ struct Context {
     std::set<unsigned> masked;
     U gateKey = ~0ull;          // button masks last applied for (page, searching, ready, buttons)
     std::string status, timer, timerCaption, statCaption, matches, gfxCaption, playClockText, playAmpmText, playClock24Text, throwText;  // what the page's dynamic text shows
+    std::string updateText;     // the newer version (empty: NO UPDATE, red dot)
+    int updateShown = -1;       // UPDATE's text and dot set since the overlay loaded
     int searchShown = -1;       // the searching layout (teal card, timer, CANCEL SEARCH) shown
     int gfxShown = -2;          // the graphics choice lit (GFX_*)
     bool setup = false;         // the hotkey keyboard is up instead of the PLAY or SFX page
@@ -2048,7 +2120,7 @@ int soundPad(U n) {
 bool onOurPage(const Context& c) { return c.page == Page::Queue || c.page == Page::Sounds; }
 bool isOurs(U n) {
     if (keyFor(n) || n == QUEUE_CLIP_KEY || soundPad(n) >= 0 || n == QUEUE_SOUND_TAB || n == QUEUE_SOUND_EDIT) return true;
-    return n == QUEUE_TAB || n == QUEUE_START || n == QUEUE_CANCEL || n == QUEUE_LOBBY || n == QUEUE_PRIVATE || n == QUEUE_STATS ||
+    return n == QUEUE_TAB || n == QUEUE_START || n == QUEUE_COMBAT || n == QUEUE_UPDATE || n == QUEUE_CANCEL || n == QUEUE_LOBBY || n == QUEUE_PRIVATE || n == QUEUE_STATS ||
            n == QUEUE_GFX_HIGH || n == QUEUE_GFX_LOW || n == QUEUE_CLIP || n == QUEUE_CLOCK || n == QUEUE_PLAY_CLOCK || n == QUEUE_CLOCK_12 || n == QUEUE_CLOCK_24;
 }
 
@@ -2431,7 +2503,7 @@ std::string elapsed(U ms) {
 
 std::string statusFor(int state) {
     U now = GetTickCount64();
-    if (state >= 3 && state <= 6) return ourPrivate ? "CREATING A PRIVATE MATCH" : "SEARCHING FOR A MATCH";
+    if (state >= 3 && state <= 6) return ourPrivate ? "CREATING A PRIVATE MATCH" : !ourSearch ? "SEARCHING FOR A MATCH" : ourCombat ? "SEARCHING FOR COMBAT" : "SEARCHING FOR ARENA";
     if (state == LOBBY_JOIN_QUEUED) {
         U since = joinQueuedSince;
         if (ourSearch && !ourPrivate && since && now - since < JOIN_DELAY_MS)  // a private match has no countdown
@@ -2441,7 +2513,8 @@ std::string statusFor(int state) {
     if (state == 8) return "JOINING THE MATCH...";
     if (accessBlocked) return "ECHOLAZYTABLET IS OFF FOR THIS ACCOUNT";
     if (inPublicMatch()) return "PUBLIC MATCH - QUEUE WHEN IT ENDS";
-    return "TAP FIND MATCH TO QUEUE";
+    std::string update = updateAvailable();
+    return "PICK ARENA OR COMBAT";
 }
 
 void setText(void* canvas, unsigned element, std::string& shownText, const std::string& value) {
@@ -2499,7 +2572,7 @@ void render(Context& c) {
             ensure(overlay, i, sounds && !c.setup);
     }
     if (overlay && active) {   // the title strip: PLAY or SFX, or what's being set and the hotkey picked so far
-        std::string sub = sounds ? "SOUNDBOARD" : "ARENA MATCHMAKING";
+        std::string sub = sounds ? "SOUNDBOARD" : "MATCHMAKING";
         if (c.setup && now < c.pickFirstUntil) sub = c.pickMessage;
         else if (c.setup && c.naming) sub = c.name.empty() ? "TYPE A NAME, THEN SAVE" : "NAME: " + c.name;
         else if (c.setup && !c.ctrl && !c.shift && !c.alt && c.key.empty()) sub = c.setupSlot < 0 ? "PICK YOUR CLIP APP'S HOTKEY" : "PICK YOUR SOUND'S HOTKEY";
@@ -2587,7 +2660,18 @@ void render(Context& c) {
         if (gfxMessageAt && now - gfxMessageAt < 4000) { c.flash = gfxMessage; c.flashUntil = gfxMessageAt + 4000; }
         std::string message = now < c.flashUntil && !searching ? c.flash : statusFor(state);
         setText(page, QUEUE_PAGE_STATUS, c.status, message);
-        // Searching layout: teal card, queue timer, CANCEL SEARCH in place of FIND MATCH.
+        // Beside 12H / 24H: DOWNLOAD V3.22 with a green dot while a newer release is out (tap: the
+        // release page), NO UPDATE with a red one otherwise (tapping does nothing).
+        std::string update = updateAvailable();
+        if (update != c.updateText || c.updateShown < 0) {
+            bool on = !update.empty();
+            text(page, QUEUE_PAGE_UPDATE_TEXT, on ? ("DOWNLOAD V" + update).c_str() : "NO UPDATE");
+            show(page, QUEUE_PAGE_UPDATE_DOT, on);
+            show(page, QUEUE_PAGE_UPDATE_DOT_RED, !on);
+            c.updateText = update;
+            c.updateShown = 1;
+        }
+        // Searching layout: teal card, queue timer, CANCEL SEARCH in place of ARENA and COMBAT.
         if (c.searchShown != int(searching)) {
             show(page, QUEUE_PAGE_CARD, !searching);
             show(page, QUEUE_PAGE_CARD_ACTIVE, searching);
@@ -2599,6 +2683,8 @@ void render(Context& c) {
             show(page, QUEUE_PAGE_LOBBY_BUSY, searching);
             show(page, QUEUE_PAGE_FIND, !searching);
             show(page, QUEUE_PAGE_FIND_TEXT, !searching);
+            show(page, QUEUE_PAGE_COMBAT, !searching);
+            show(page, QUEUE_PAGE_COMBAT_TEXT, !searching);
             show(page, QUEUE_PAGE_CANCEL, searching);
             show(page, QUEUE_PAGE_CANCEL_TEXT, searching);
             c.searchShown = int(searching);
@@ -2679,8 +2765,9 @@ void gate(Context& c, void* cs) {
         else if (c.setup && onOurPage(c)) hide = true;   // the page's own buttons, under the setup page
         else if (b.name == QUEUE_CLOCK) hide = c.page != Page::Sounds;
         else if (b.name == QUEUE_PLAY_CLOCK || b.name == QUEUE_CLOCK_12 || b.name == QUEUE_CLOCK_24) hide = c.page != Page::Queue;
+        else if (b.name == QUEUE_UPDATE) hide = c.page != Page::Queue || updateAvailable().empty();
         else if (soundPad(b.name) >= 0 || b.name == QUEUE_SOUND_EDIT) hide = c.page != Page::Sounds;
-        else if (b.name == QUEUE_START) hide = c.page != Page::Queue || matchmaking(c.state);
+        else if (b.name == QUEUE_START || b.name == QUEUE_COMBAT) hide = c.page != Page::Queue || matchmaking(c.state);
         else if (b.name == QUEUE_CANCEL) hide = c.page != Page::Queue || !matchmaking(c.state);
         else if (b.name == QUEUE_LOBBY) hide = c.page != Page::Queue || matchmaking(c.state);
         else if (b.name == QUEUE_PRIVATE) hide = c.page != Page::Queue || matchmaking(c.state);
@@ -2823,7 +2910,7 @@ void unload(void* p, U a, U b, U c) {
             if (kind == 2) {
                 ctx.status.clear(), ctx.timer.clear(), ctx.timerCaption.clear(), ctx.statCaption.clear(), ctx.matches.clear();
                 ctx.gfxCaption.clear(), ctx.titleText.clear(), ctx.subtitleText.clear(), ctx.playClockText.clear(), ctx.playAmpmText.clear(), ctx.throwText.clear();
-                ctx.playClock24Text.clear();
+                ctx.playClock24Text.clear(), ctx.updateText.clear(), ctx.updateShown = -1;  // a fresh overlay: set UPDATE again
                 ctx.clockText.clear(), ctx.clockFormatText.clear(), ctx.keyOtherText.clear();
                 ctx.keyCtrlText.clear(), ctx.keyShiftText.clear(), ctx.keyAltText.clear();
                 ctx.soundStatus.clear(), ctx.soundEditText.clear();
@@ -2950,13 +3037,14 @@ void onEvent(void* gs, U event, U actor, U component, int arg) {
             c.flashUntil = GetTickCount64() + 2000;
             pressKeys(soundKeys[pad]);
         }
-    } else if (component == QUEUE_START && c.page == Page::Queue) {
-        logf("tablet: FIND MATCH pressed (thread %lu)", GetCurrentThreadId());
+    } else if ((component == QUEUE_START || component == QUEUE_COMBAT) && c.page == Page::Queue) {
+        bool combat = component == QUEUE_COMBAT;
+        logf("tablet: %s pressed (thread %lu)", combat ? "COMBAT" : "ARENA", GetCurrentThreadId());
         playSound(SOUND_CLICK);
         c.flash = "STARTING THE SEARCH...";
         c.flashUntil = GetTickCount64() + 3000;
         lastResult = int(Queued::None);
-        if (!fault) requestQueue("FIND MATCH");
+        if (!fault) requestQueue(combat ? "COMBAT" : "ARENA", false, combat);
     } else if (component == QUEUE_CANCEL && c.page == Page::Queue) {
         logf("tablet: CANCEL SEARCH pressed");
         playSound(SOUND_CLICK);
@@ -2974,6 +3062,12 @@ void onEvent(void* gs, U event, U actor, U component, int arg) {
         playSound(SOUND_CLICK);
         WritePrivateProfileStringW(L"clock", L"format", twelve ? L"12" : L"24", iniPath().c_str());
         logf("tablet: clock shows %s", twelve ? "12-hour" : "24-hour");
+    } else if (component == QUEUE_UPDATE && c.page == Page::Queue && !updateAvailable().empty()) {
+        logf("tablet: UPDATE AVAILABLE pressed; opening the latest release in the browser");
+        playSound(SOUND_CLICK);
+        c.flash = "OPENING THE UPDATE ON YOUR PC'S BROWSER";
+        c.flashUntil = GetTickCount64() + 4000;
+        openLatestRelease();
     } else if (component == QUEUE_LOBBY && c.page == Page::Queue) {
         logf("tablet: LOBBY pressed (%s)", inMatch ? "in a match" : "not in a match");
         playSound(SOUND_CLICK);
@@ -3085,7 +3179,7 @@ void dispatch(void* gs, U event, U actor, U component, int arg) {
 // ---- hotkey ----
 LRESULT CALLBACK windowDetour(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
     if (message == WM_QUEUE || message == WM_PRIVATE) {
-        Queued r = fault ? Queued::NotReady : queueNow(message == WM_PRIVATE);
+        Queued r = fault ? Queued::NotReady : queueNow(message == WM_PRIVATE, message == WM_QUEUE && wparam == 1);
         lastResult = int(r);
         lastResultAt = GetTickCount64();
         return 0;
@@ -3361,7 +3455,7 @@ void install() {
 }  // namespace audioback
 
 void initialize() {
-    logf("EchoLazyTablet v3.20 starting (pid %lu)", GetCurrentProcessId());
+    logf("EchoLazyTablet v3.21 starting (pid %lu)", GetCurrentProcessId());
     graphicsStartup();   // first: Echo reads its settings soon after start
     if (liveTextures()) texlod::loadAll();
     if (!verifyExecutable()) { fault = tabletFault = true; logf("EchoLazyTablet disabled"); return; }
@@ -3383,6 +3477,7 @@ void initialize() {
     if (HANDLE t = CreateThread(nullptr, 0, matchWatch, nullptr, 0, nullptr)) CloseHandle(t);
     if (HANDLE t = CreateThread(nullptr, 0, playersWatch, nullptr, 0, nullptr)) CloseHandle(t);
     if (HANDLE t = CreateThread(nullptr, 0, accessWatch, nullptr, 0, nullptr)) CloseHandle(t);
+    if (HANDLE t = CreateThread(nullptr, 0, updateWatch, nullptr, 0, nullptr)) CloseHandle(t);
 }
 
 void start(HMODULE self) {

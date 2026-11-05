@@ -270,7 +270,7 @@ h2 { margin: 0; font-size: 30px; line-height: 1.15; font-weight: 700; letter-spa
 .launchbtn.off span { color: var(--dim); }
 .launchbtn.bad span { color: var(--bad); }
 
-/* FIND MATCH: opens Echo VR as well */
+/* COMBAT and ARENA: open Echo VR as well */
 button.find { position: relative; width: 100%; color: var(--text); cursor: pointer; transition: filter .15s, transform .12s; }
 button.find b { font: 700 13px var(--mono); }
 button.find:hover:not(:disabled) { filter: brightness(1.3); transform: translateY(-1px); }

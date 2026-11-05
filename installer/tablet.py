@@ -40,7 +40,8 @@ OVERLAY = sym('echo_queue_overlay_v1')    # v3.9: everything EchoLazyTablet show
 ROOT_SLOT, ROOT_SLOT_NAME = 6, 0xfb8485552d32128c
 ICON_TEXTURE = sym('echo_queue_tab_icon_texture_v1')
 TAB_BUTTON = sym('echo_queue_tab_button_v1')
-START_BUTTON = sym('echo_queue_start_button_v1')
+START_BUTTON = sym('echo_queue_start_button_v1')    # ARENA
+COMBAT_BUTTON = sym('echo_queue_combat_button_v1')
 CANCEL_BUTTON = sym('echo_queue_cancel_button_v1')
 LOBBY_BUTTON = sym('echo_queue_lobby_button_v1')
 STATS_BUTTON = sym('echo_queue_stats_button_v1')
@@ -53,6 +54,7 @@ CLOCK_BUTTON = sym('echo_queue_clock_format_button_v1')  # the title strip's 12H
 PLAY_CLOCK_BUTTON = sym('echo_queue_play_clock_button_v1')  # the PLAY page's clock: tap for 12 / 24 hour
 CLOCK_12_BUTTON = sym('echo_queue_clock_12_button_v1')      # 12H and 24H, beside it
 CLOCK_24_BUTTON = sym('echo_queue_clock_24_button_v1')
+UPDATE_BUTTON = sym('echo_queue_update_button_v1')        # UPDATE AVAILABLE: opens the latest release in the browser
 SOUND_TAB_BUTTON = sym('echo_queue_sound_tab_button_v1')  # the SFX tab, next to PLAY
 SOUND_EDIT_BUTTON = sym('echo_queue_sound_edit_button_v1')
 SOUND_PADS = 8                            # the SFX page's buttons, each with its own keybind
@@ -86,10 +88,13 @@ CARD = (2, 8, PAGE_W - 2, 520)
 # The PLAY page, on one grid: everything between x 28 and 972, rows 16 px apart.
 MODE_TILE = (28, 22, 148, 142)
 TIME = (500, 22, 700, 142)                      # the clock's card, beside the mode; right of it is free (tap: 12 / 24 hour)
-BUTTON = (28, 166, 632, 250)                    # FIND MATCH / CANCEL SEARCH
+BUTTON = (28, 166, 632, 250)                    # CANCEL SEARCH (where ARENA and COMBAT are)
+COMBAT = (28, 166, 322, 250)                    # COMBAT: queues for Echo Combat
+ARENA = (338, 166, 632, 250)                    # ARENA: queues for Echo Arena (in the middle)
 CLIP = (648, 166, 852, 250)                     # CLIP: presses the player's clip keybind
 CLIP_KEY = (868, 166, 972, 250)                 # KEY: sets that keybind
 TILE_W, TILE_GAP, TILE_Y = 176, 16, (270, 506)  # the five boxes along the bottom
+UPDATE = (808, 60, 984, 104)                    # UPDATE AVAILABLE (a pill beside 12H / 24H): only while a newer EchoLazyTablet is on GitHub
 CLOCK_FORMAT = (732, 48, 816, 100)               # 12H / 24H, in the title strip (overlay pixels)
 KEYBOARD = (4, 106, 1020, 658)                   # the CLIP HOTKEY keyboard: the whole screen under the title strip
 SOUND_EDIT = (760, 20, 960, 98)                  # the SFX page's EDIT / DONE
@@ -110,6 +115,10 @@ ROW_BORDER_UV = dict(tl=(0.793, 0.0059, 0.8535, 0.0664), t=(0.4688, 0.0059, 0.52
 FIND_FILL, FIND_BORDER = (.05, .46, .45, 1), (.2, .78, .75, 1)
 CANCEL_FILL, CANCEL_BORDER = (.5, .24, .22, 1), (.66, .32, .29, 1)
 CLIP_FILL, CLIP_BORDER = (.6, .32, .05, 1), (.9, .55, .15, 1)
+UPDATE_DOT = (.25, .95, .35, 1)   # UPDATE AVAILABLE's dot (green)
+UPDATE_DOT_NONE = (.95, .2, .2, 1)  # NO UPDATE's dot (red)
+UPDATE_BOX = (.14, .15, .17, 1)   # ...and its box: a dark grey, just lighter than the page
+UPDATE_EDGE = (.06, .065, .08, 1)  # ...with a darker outline
 TAB_IDLE_UV = (0.6904, 0.3645, 0.7393, 0.3937)
 TAB_SELECTED_UV = (0.6899, 0.3297, 0.7393, 0.3595)
 BGRA_TEMPLATE = 0x84b9a06506af66fe        # stock 128x128 B8G8R8A8 texture (header template)
@@ -214,6 +223,17 @@ def icon_texture(atlas):
         tex.alpha_composite(glyph(120), (col * 128 + 4, 260))
         uvs[key] = ((col * 128 + 4) / ICON_W, 260 / ICON_H, (col * 128 + 124) / ICON_W, 380 / ICON_H)
     tex.alpha_composite(potato(120), (4, 388))
+    dot = Image.new('RGBA', (480, 480), (0, 0, 0, 0))   # a round dot (drawn big, then shrunk smooth), tinted per use
+    from PIL import ImageDraw
+    ImageDraw.Draw(dot).ellipse((8, 8, 472, 472), fill=(255, 255, 255, 255))
+    tex.alpha_composite(dot.resize((120, 120), Image.LANCZOS), (132, 388))
+    uvs['dot'] = (132 / ICON_W, 388 / ICON_H, 252 / ICON_W, 508 / ICON_H)
+    # UPDATE AVAILABLE's box: a rounded rectangle at its own shape (so the corners aren't stretched), 1.25x size.
+    bw, bh = round((UPDATE[2] - UPDATE[0]) * 1.25), round((UPDATE[3] - UPDATE[1]) * 1.25)
+    pill = Image.new('RGBA', (bw * 4, bh * 4), (0, 0, 0, 0))
+    ImageDraw.Draw(pill).rounded_rectangle((0, 0, bw * 4 - 1, bh * 4 - 1), radius=bh * 4 // 3, fill=(255, 255, 255, 255))
+    tex.alpha_composite(pill.resize((bw, bh), Image.LANCZOS), (260, 388))
+    uvs['pill'] = (260 / ICON_W, 388 / ICON_H, (260 + bw) / ICON_W, (388 + bh) / ICON_H)
     uvs['potato'] = (4 / ICON_W, 388 / ICON_H, 124 / ICON_W, 508 / ICON_H)
     r, g, b, a = tex.split()
     return Image.merge('RGBA', (b, g, r, a)).tobytes(), uvs
@@ -405,7 +425,7 @@ def build(m):
     sprite('echo_queue_mode_icon_v1', (16, 16, tw - 16, tw - 16), icon_uvs['disc'], WHITE, parent=tile, texture=ICON_TEXTURE)
     text('echo_queue_title_text_v1', 'ECHO ARENA', (168, 24, 488, 76), 50, WHITE, align=0)
     text('echo_queue_mode_text_v1', 'PUBLIC MATCH', (170, 76, 580, 104), 24, ACCENT, align=0)
-    e['status'] = text('echo_queue_status_v1', 'TAP FIND MATCH TO QUEUE', (170, 106, 488, 140), 22, TEXT, align=0, capacity=96)
+    e['status'] = text('echo_queue_status_v1', 'PICK ARENA OR COMBAT', (170, 106, 488, 140), 22, TEXT, align=0, capacity=96)
     sprite('echo_queue_play_clock_base_v1', TIME, CARD_UV, WHITE)
     clock_box = sprite('echo_queue_play_clock_box_v1', TIME, CARD_ACTIVE_UV, WHITE)
     sprite('echo_queue_play_clock_fill_v1', (6, 6, TIME[2] - TIME[0] - 6, TIME[3] - TIME[1] - 6), ROW_FILL_UV, (*FIND_FILL[:3], .55),
@@ -424,6 +444,17 @@ def build(m):
         sprite(f'echo_queue_{key}_fill_v1', (4, 4, w - 4, h - 4), ROW_FILL_UV, FIND_BORDER, parent=e[key], texture=ROW_ATLAS)
         text(f'echo_queue_{key}_text_v1', label, rect, 26, WHITE)
         clock_rects[key] = rect
+    # UPDATE AVAILABLE, right of 12H / 24H: one line and a dot on a light grey rounded box
+    # (always there; green and tappable when a newer release is out).
+    ux0, uy0, ux1, uy1 = UPDATE
+    edge = 5   # the outline: the same rounded shape 5 px bigger all round, the box on top of it
+    e['update'] = sprite('echo_queue_update_edge_v1', (ux0 - edge, uy0 - edge, ux1 + edge, uy1 + edge), icon_uvs['pill'], UPDATE_EDGE, texture=ICON_TEXTURE)
+    sprite('echo_queue_update_box_v1', (edge, edge, ux1 - ux0 + edge, uy1 - uy0 + edge), icon_uvs['pill'], UPDATE_BOX, parent=e['update'], texture=ICON_TEXTURE)
+    # NO UPDATE with a red dot; DOWNLOAD V3.22 (the new version) with a green one (the plugin swaps them; only green can be tapped).
+    e['update_text'] = text('echo_queue_update_text_v1', 'NO UPDATE', (ux0 + 10, uy0, ux1 - 26, uy1), 19, WHITE, capacity=24)
+    dot = (ux1 - 24, uy0 + 15, ux1 - 10, uy0 + 29)
+    e['update_dot_red'] = sprite('echo_queue_update_dot_red_v1', dot, icon_uvs['dot'], UPDATE_DOT_NONE, texture=ICON_TEXTURE)
+    e['update_dot'] = sprite('echo_queue_update_dot_v1', dot, icon_uvs['dot'], UPDATE_DOT, hidden=True, texture=ICON_TEXTURE)
 
     def lobby_row(name, rect, fill, border, title, hidden=False, size=46):
         x0, y0, x1, y1 = rect
@@ -439,7 +470,8 @@ def build(m):
         struct.pack_into('<i', page.elements[label], 0x5c, row)
         return row, label
 
-    e['find'], e['find_text'] = lobby_row('echo_queue_find_row_v1', BUTTON, FIND_FILL, FIND_BORDER, 'FIND MATCH')
+    e['find'], e['find_text'] = lobby_row('echo_queue_find_row_v1', ARENA, FIND_FILL, FIND_BORDER, 'ARENA')
+    e['combat'], e['combat_text'] = lobby_row('echo_queue_combat_row_v1', COMBAT, FIND_FILL, FIND_BORDER, 'COMBAT')
     e['cancel'], e['cancel_text'] = lobby_row('echo_queue_cancel_row_v1', BUTTON, CANCEL_FILL, CANCEL_BORDER, 'CANCEL SEARCH', hidden=True)
     e['clip'], e['clip_text'] = lobby_row('echo_queue_clip_row_v1', CLIP, CLIP_FILL, CLIP_BORDER, 'CLIP')
     lobby_row('echo_queue_clip_key_row_v1', CLIP_KEY, CLIP_FILL, CLIP_BORDER, 'KEY', size=30)
@@ -562,7 +594,7 @@ def build(m):
     # PLAY's status (READY, or the queue timer while searching) in the strip's top right corner, left of the stock close button.
     e['timer_caption'] = text('echo_queue_timer_caption_v1', 'STATUS', (580, 48, 702, 100), 18, ACCENT, align=1, hidden=True, capacity=24)
     e['timer'] = text('echo_queue_timer_v1', 'READY', (714, 40, 840, 108), 32, WHITE, align=0, hidden=True, capacity=16)
-    subtitle = text('echo_queue_subtitle_v1', 'ARENA MATCHMAKING', (242, 40, 810, 108), 30, WHITE, align=0, hidden=True, capacity=64)
+    subtitle = text('echo_queue_subtitle_v1', 'MATCHMAKING', (242, 40, 810, 108), 30, WHITE, align=0, hidden=True, capacity=64)
     # The clock at the strip's right end, and the 12H / 24H switch next to it (it names the format shown).
     clock = text('echo_queue_clock_v1', '00:00', (560, 40, 722, 108), 36, WHITE, align=1, hidden=True, capacity=16)
     clock_format = sprite('echo_queue_clock_format_v1', CLOCK_FORMAT, CARD_ACTIVE_UV, WHITE, hidden=True)
@@ -609,7 +641,8 @@ def build(m):
         buttons.rows.append(bytes(row))
 
     add_button(TAB_BUTTON, tab_rect, on_page=False)
-    add_button(START_BUTTON, BUTTON)
+    add_button(START_BUTTON, ARENA)
+    add_button(COMBAT_BUTTON, COMBAT)
     add_button(CANCEL_BUTTON, BUTTON)
     add_button(LOBBY_BUTTON, lobby_rect)
     add_button(STATS_BUTTON, stats_rect)
@@ -624,6 +657,7 @@ def build(m):
     add_button(PLAY_CLOCK_BUTTON, TIME)
     add_button(CLOCK_12_BUTTON, clock_rects['clock_12'])
     add_button(CLOCK_24_BUTTON, clock_rects['clock_24'])
+    add_button(UPDATE_BUTTON, UPDATE)
     add_button(SOUND_TAB_BUTTON, sound_tab_rect, on_page=False)
     add_button(SOUND_EDIT_BUTTON, SOUND_EDIT)
     for i, rect in enumerate(sound_rects):
@@ -750,11 +784,11 @@ def page_header(built):
     """src/generated/queue_tab.h: the button names and the overlay's element indices."""
     e = built['page']
     return ('// Generated by installer/tablet.py -- do not edit.\n#pragma once\n#include <cstdint>\n'
-            f'constexpr uint64_t QUEUE_TAB=0x{TAB_BUTTON:016x}, QUEUE_START=0x{START_BUTTON:016x}, '
+            f'constexpr uint64_t QUEUE_TAB=0x{TAB_BUTTON:016x}, QUEUE_START=0x{START_BUTTON:016x}, QUEUE_COMBAT=0x{COMBAT_BUTTON:016x}, '
             f'QUEUE_CANCEL=0x{CANCEL_BUTTON:016x}, QUEUE_LOBBY=0x{LOBBY_BUTTON:016x}, QUEUE_PRIVATE=0x{PRIVATE_BUTTON:016x}, '
             f'QUEUE_STATS=0x{STATS_BUTTON:016x}, QUEUE_GFX_HIGH=0x{GFX_HIGH_BUTTON:016x}, QUEUE_GFX_LOW=0x{GFX_LOW_BUTTON:016x}, QUEUE_CLIP=0x{CLIP_BUTTON:016x}, QUEUE_CLIP_KEY=0x{CLIP_KEY_BUTTON:016x}, QUEUE_CLOCK=0x{CLOCK_BUTTON:016x}, '
             f'QUEUE_SOUND_TAB=0x{SOUND_TAB_BUTTON:016x}, QUEUE_SOUND_EDIT=0x{SOUND_EDIT_BUTTON:016x}, QUEUE_PLAY_CLOCK=0x{PLAY_CLOCK_BUTTON:016x}, '
-            f'QUEUE_CLOCK_12=0x{CLOCK_12_BUTTON:016x}, QUEUE_CLOCK_24=0x{CLOCK_24_BUTTON:016x};\n'
+            f'QUEUE_CLOCK_12=0x{CLOCK_12_BUTTON:016x}, QUEUE_CLOCK_24=0x{CLOCK_24_BUTTON:016x}, QUEUE_UPDATE=0x{UPDATE_BUTTON:016x};\n'
             'constexpr uint64_t QUEUE_SOUND_BUTTONS[] = {' + ', '.join(f'0x{sound_button(i):016x}' for i in range(SOUND_PADS)) + '};\n'
             'constexpr unsigned QUEUE_SOUND_TEXTS[] = {' + ', '.join(str(e[f'sound_text_{i}']) for i in range(SOUND_PADS)) + '};\n'
             'constexpr unsigned QUEUE_SOUND_CAPTIONS[] = {' + ', '.join(str(e[f'sound_caption_{i}']) for i in range(SOUND_PADS)) + '};\n'

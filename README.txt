@@ -1,9 +1,9 @@
-EchoLazyTablet 3.20 - Echo Arena matchmaking from your hand tablet (Echo VR, EchoVRCE)
+EchoLazyTablet 3.21 - Echo Arena and Echo Combat matchmaking from your hand tablet (Echo VR, EchoVRCE)
 
 What it does
   A PLAY tab, second on the hand tablet's tab bar (after SFX, below):
-  * FIND MATCH queues for a public Echo Arena match (CANCEL SEARCH while searching, with a
-    queue timer) and joins it when one is found. F9 in Echo's window does the same.
+  * COMBAT and ARENA queue for a public Echo Combat or Echo Arena match (CANCEL SEARCH while
+    searching, with a queue timer) and join it when one is found. F9 in Echo's window queues for Arena.
   * PRIVATE MATCH creates a private Echo Arena match on the game server with your lowest ping
     (EchoVRCE's matchmaker picks it), or on a server of your choice set in EchoLazyTablet.ini.
   * LOBBY takes you from a match back to the social lobby.
@@ -19,6 +19,9 @@ What it does
     arena and lobby hidden; your render resolution is left alone). Tap one, then restart Echo VR.
   * A clock on the PLAY page, with 12H and 24H buttons beside it (on the SFX page it's in the
     title strip). PLAY's status (READY, or the queue timer) is in the strip's top right corner.
+  * Beside 12H / 24H: NO UPDATE (red dot), or DOWNLOAD Vx.y (green dot) when a newer EchoLazyTablet is
+    on GitHub; tap the green one to open the latest release in your PC's browser (checked
+    when Echo starts and every 6 hours).
   * Sound output back when Echo closes: set [audio] after_echo in EchoLazyTablet.ini to your speakers'
     name, and Windows switches back to them from the headset.
   * Joining or leaving fades the headset to black (after [fade] delay_ms).
@@ -26,7 +29,7 @@ What it does
   soundboards. Bind a sound to a key in your soundboard, then tap an empty button (or EDIT, then a
   button) and pick the same key on the tablet, then type a name for it (or NO NAME). They're kept as
   [sounds] key1 to key8 and name1 to name8 in EchoLazyTablet.ini.
-  In a public match, FIND MATCH and PRIVATE MATCH wait until the match is over (no leaving your
+  In a public match, ARENA, COMBAT and PRIVATE MATCH wait until the match is over (no leaving your
   team mid-game); private matches and the lobby are fine.
   Needs Echo VR build 1683152886 and EchoLoader. On any other build it switches itself off and
   says so in plugins\EchoLazyTablet.log.

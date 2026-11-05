@@ -154,14 +154,14 @@ async function launchEcho() {
   renderTablet(view);
 }
 
-// FIND MATCH opens Echo VR too (the search itself is pressed in the game).
-function findButton() {
+// COMBAT and ARENA open Echo VR too (the search itself is pressed in the game).
+function findButton(label) {
   const st = launchState();
   const b = el('button', 'find' + (st.off ? ' off' : ''));
   b.type = 'button';
   b.disabled = st.off;
   b.title = st.off ? st.hint : 'Open Echo VR';
-  b.append(el('b', '', 'FIND MATCH'));
+  b.append(el('b', '', label));
   b.onclick = launchEcho;
   return b;
 }
@@ -255,14 +255,14 @@ function renderPage(kind, tab, p) {
   const name = (p && p.name) || 'YOU';
   const heading = (title, sub) => { $('ttitle').textContent = title; $('tsub').textContent = sub || ''; };
   if (kind === 'play') {
-    heading('PLAY', 'ARENA MATCHMAKING');
+    heading('PLAY', 'MATCHMAKING');
     const card = el('div', 'card');
     const img = el('img', 'mini-disc'); img.src = 'disc.svg'; img.alt = '';
     const words = el('div'); words.append(el('b', '', 'ECHO ARENA'), el('i', '', 'PUBLIC MATCH'));
     card.append(img, words, launchButton());
-    // FIND MATCH with CLIP and KEY beside it, then the four boxes, as on the tablet in the game.
+    // COMBAT and ARENA with CLIP and KEY beside them, then the four boxes, as on the tablet in the game.
     const row = el('div', 'findrow');
-    row.append(findButton(), el('span', 'clip', 'CLIP'), el('span', 'clip key', 'KEY'));
+    row.append(findButton('COMBAT'), findButton('ARENA'), el('span', 'clip', 'CLIP'), el('span', 'clip key', 'KEY'));
     const boxes = el('div', 'boxes');
     for (const [label, value] of [['PRIVATE MATCH', 'CREATE'], ['LOBBY', '⌂ GO'], ['MATCHES OVERALL', p && p.matches != null ? String(p.matches) : '—'], ['LAST THROW', '— M/S']]) {
       const b = el('div'); b.append(el('small', '', label), el('span', '', value)); boxes.append(b);
