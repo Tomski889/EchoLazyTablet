@@ -51,8 +51,27 @@ def settings_path():
     return Path(os.environ.get('LOCALAPPDATA', '')) / 'rad' / 'loneecho' / 'settings_mp_v2.json'
 
 
+def nevr_root():
+    r"""nEVR's folder for its runtime, plugins and config.yaml (%LOCALAPPDATA%\nevr\echovr, or NEVR_ROOT)."""
+    return Path(os.environ.get('NEVR_ROOT') or Path(os.environ.get('LOCALAPPDATA', '')) / 'nevr' / 'echovr')
+
+
+def is_nevr(game):
+    """The game runs on nEVR (EchoTools/nevr-runtime): its BugSplat64.dll is nEVR's host, not BugSplat's.
+    nEVR loads plugins from its own folder (listed in config.yaml) and refuses to start beside a dbgcore.dll."""
+    try:
+        return b'nevr' in (Path(game) / 'bin' / 'win10' / 'BugSplat64.dll').read_bytes().lower()
+    except OSError:
+        return False
+
+
+def plugins_dir(game):
+    r"""Where EchoLazyTablet's files live: nEVR's plugins folder on nEVR, else bin\win10\plugins (EchoLoader)."""
+    return nevr_root() / 'plugins' if is_nevr(game) else Path(game) / 'bin' / 'win10' / 'plugins'
+
+
 def ini_path(game):
-    return Path(game) / 'bin' / 'win10' / 'plugins' / 'EchoLazyTablet.graphics.ini'
+    return plugins_dir(game) / 'EchoLazyTablet.graphics.ini'
 
 
 def write_atomic(path, data):
@@ -289,7 +308,7 @@ def switch(game, low):
         set_graphics(values)
     import ctypes
     ctypes.windll.kernel32.WritePrivateProfileStringW('graphics', 'mode', 'low' if low else 'high',
-                                                      str(Path(game) / 'bin' / 'win10' / 'plugins' / 'EchoLazyTablet.ini'))
+                                                      str(plugins_dir(game) / 'EchoLazyTablet.ini'))
 
 
 def undo(game, log=print, keep_ini=False):

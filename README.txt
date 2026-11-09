@@ -1,4 +1,4 @@
-EchoLazyTablet 3.22 - Echo Arena and Echo Combat matchmaking from your hand tablet (Echo VR, EchoVRCE)
+EchoLazyTablet 3.25 - Echo Arena and Echo Combat matchmaking from your hand tablet (Echo VR, EchoVRCE)
 
 What it does
   A PLAY tab, second on the hand tablet's tab bar (after SFX, below):
@@ -42,6 +42,11 @@ Installing (players)
   * No EchoLoader yet: the window offers "Get EchoLoader and install", which downloads EchoLoader
     from the EchoVRCE community update (files.echovr.de, each file checked against its SHA-256) into
     bin\win10, then installs EchoLazyTablet. A dbgcore.dll already there is kept as dbgcore.echoqueue-orig.dll.
+  * nEVR (the NEVR launcher): nEVR won't start beside EchoLoader's dbgcore.dll ("dbgcore.dll hijack
+    detected"). On a game running nEVR the installer renames that file to dbgcore.dll.legacy-<date>, puts
+    EchoLazyTablet in nEVR's plugins folder (%LOCALAPPDATA%\nevr\echovr\plugins) and adds it to nEVR's
+    config.yaml; Uninstall takes it out again. nEVR calls it an unverified file (it isn't signed by nEVR); it
+    still loads.
   * Echo Mods: applying an Echo Mods profile switches off plugins the profile doesn't name, so the
     installer names EchoLazyTablet (on) in every Echo Mods profile. If Echo Mods rebuilds the lobby from an
     older snapshot, the window says so: run Repair afterwards.

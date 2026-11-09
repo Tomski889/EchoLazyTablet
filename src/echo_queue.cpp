@@ -1768,7 +1768,7 @@ DWORD WINAPI playersWatch(LPVOID) {
 // sends the account's ID and display name from the saved profile (xplatformid, displayname)
 // and gets back blocked or not. The answer is kept in EchoLazyTablet.ini ([access] blocked) for
 // when the service can't be reached; with no answer ever, EchoLazyTablet stays on.
-constexpr const char* ECHOQUEUE_VERSION = "3.22";
+constexpr const char* ECHOQUEUE_VERSION = "3.25";
 constexpr const wchar_t* ACCESS_HOST = L"echoqueue.dokuyegar.workers.dev";  // the deployed Worker (server/worker.js)
 constexpr U ACCESS_EVERY_MS = 15 * 60 * 1000;
 
@@ -2158,8 +2158,10 @@ std::string gfxMessage;     // the last switch's result (under tabletMutex)
 U gfxMessageAt = 0;
 
 std::wstring manifestPath() {
-    std::wstring root = dir;
-    for (int i = 0; i < 3; i++) root.resize(root.find_last_of(L"\\/"));  // plugins -> win10 -> bin -> game
+    wchar_t exe[MAX_PATH];   // from echovr.exe, not our own folder: on nEVR the plugin lives in %LOCALAPPDATA%\nevr
+    GetModuleFileNameW(nullptr, exe, MAX_PATH);
+    std::wstring root = exe;
+    for (int i = 0; i < 3; i++) root.resize(root.find_last_of(L"\\/"));  // echovr.exe -> win10 -> bin -> game
     return root + L"\\_data\\5932408047\\rad15\\win10\\manifests\\48037dc70b0ecab2";
 }
 
@@ -3455,7 +3457,7 @@ void install() {
 }  // namespace audioback
 
 void initialize() {
-    logf("EchoLazyTablet v3.22 starting (pid %lu)", GetCurrentProcessId());
+    logf("EchoLazyTablet v3.25 starting (pid %lu)", GetCurrentProcessId());
     graphicsStartup();   // first: Echo reads its settings soon after start
     if (liveTextures()) texlod::loadAll();
     if (!verifyExecutable()) { fault = tabletFault = true; logf("EchoLazyTablet disabled"); return; }
@@ -3493,6 +3495,20 @@ void start(HMODULE self) {
 }
 
 }  // namespace
+
+// nEVR (EchoTools/nevr-runtime) plugin exports: nEVR loads the plugins its config.yaml lists, and
+// NevrPluginGetInfo is the one export it requires. Everything starts from DllMain, as under EchoLoader.
+struct NevrPluginInfo {
+    const char* name;
+    const char* description;
+    uint32_t version_major, version_minor, version_patch;
+};
+extern "C" __declspec(dllexport) NevrPluginInfo NevrPluginGetInfo() {
+    return {"EchoLazyTablet", "Echo Arena and Echo Combat matchmaking from your hand tablet", 3, 25, 0};
+}
+extern "C" __declspec(dllexport) uint32_t NevrPluginGetApiVersion() { return 3; }
+// COSMETIC | NETWORK | HOOKS_ENGINE: tablet pages, Echo's API and the update check, its own detours.
+extern "C" __declspec(dllexport) uint32_t NevrPluginGetCapabilities() { return 0x02 | 0x10 | 0x20; }
 
 extern "C" __declspec(dllexport) void PluginInit(const char*) {
     HMODULE self = nullptr;

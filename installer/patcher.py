@@ -22,7 +22,7 @@ import echodata as E
 import graphics
 import tablet
 
-VERSION = '3.22'
+VERSION = '3.25'
 EXE_TIMESTAMP = 1683152886
 DATA = Path('_data/5932408047/rad15/win10')
 STOCK_PACKAGES = 3
@@ -153,7 +153,8 @@ class Game:
     def __init__(self, folder):
         self.folder = Path(folder)
         self.bin = self.folder / 'bin/win10'
-        self.plugins = self.bin / 'plugins'
+        self.nevr = graphics.is_nevr(self.folder)     # nEVR: plugins in its own folder, listed in its config.yaml
+        self.plugins = graphics.plugins_dir(self.folder)
         self.data = self.folder / DATA
         self.manifests = self.data / 'manifests'
         self.packages = self.data / 'packages'
@@ -172,6 +173,8 @@ class Game:
             raise InstallError(f'{self.record.name} is damaged; EchoLazyTablet cannot tell what it changed.')
 
     def loader_plugins(self):
+        if self.nevr:
+            return [n for n, _, _ in _nevr_entries(_nevr_lines())]
         try:
             return [p.get('file', '') for p in json.loads((self.bin / 'echoloader.json').read_text()).get('plugins', [])]
         except (OSError, ValueError, AttributeError):
@@ -180,8 +183,9 @@ class Game:
 
 def has_loader(game):
     """EchoLoader as dinput8.dll (the first ones, Echo Mods'), or as dbgcore.dll (newer EchoVRCE
-    packages: the stock dbgcore.dll is a 45 KB Windows file, EchoLoader's says [EchoLoader] in it)."""
-    if (game.bin / 'dinput8.dll').is_file():
+    packages: the stock dbgcore.dll is a 45 KB Windows file, EchoLoader's says [EchoLoader] in it).
+    On nEVR its own plugin loader takes EchoLoader's place."""
+    if game.nevr or (game.bin / 'dinput8.dll').is_file():
         return True
     try:
         return b'[EchoLoader]' in (game.bin / 'dbgcore.dll').read_bytes()
@@ -210,6 +214,9 @@ def install_loader(game, log=print):
         except OSError as e:
             raise InstallError(f"Couldn't download EchoLoader ({url}): {getattr(e, 'reason', e)}. Check your internet connection.")
 
+    if game.nevr:
+        raise InstallError("This game runs on nEVR, which won't start beside EchoLoader (dbgcore.dll). "
+                           'EchoLazyTablet loads as a nEVR plugin instead: just press Install.')
     if echo_running():
         raise InstallError('Echo VR is running. Close it first.')
     hashes = {}
@@ -430,7 +437,10 @@ def scan(game):
     info = dict(problems=check(game, need_closed=False), notes=[], plugins=[], state='not installed')
     if not is_game(game.folder):
         return info
-    info['plugins'] = [p for p in game.loader_plugins() if p.lower() not in OUR_DLLS]
+    info['plugins'] = [p for p in game.loader_plugins() if p.lower() not in OUR_DLLS + OUR_NAMES]
+    if game.nevr:
+        info['notes'].append("nEVR found: EchoLazyTablet installs as a nEVR plugin (in nEVR's plugins folder and config.yaml). "
+                             'nEVR may call it an unverified file: it is not signed by nEVR, and it still loads.')
     m = game.load()
     record = None
     try:
@@ -483,6 +493,115 @@ def _set_loader(game, present):
         plugins.append({'file': 'EchoLazyTablet.dll', 'args': {}})
     config['plugins'] = plugins
     _replace(path, json.dumps(config, indent=4).encode())
+
+
+# ---- nEVR (EchoTools/nevr-runtime): plugins listed in config.yaml, loaded from its root's plugins\ ----
+# early: loads before Echo reads its data and settings, as EchoLoader did (graphics, textures).
+NEVR_ENTRY = ('- name: EchoLazyTablet', '  file: EchoLazyTablet.dll', '  early: true')
+OUR_NAMES = ('echolazytablet', 'echolazytablet.dll', 'echoqueue', 'echoqueue.dll')
+
+
+def _nevr_config():
+    return graphics.nevr_root() / 'config.yaml'
+
+
+def _nevr_lines():
+    try:
+        return _nevr_config().read_text(encoding='utf-8-sig').splitlines()
+    except FileNotFoundError:
+        return []
+
+
+def _indent(line):
+    return len(line) - len(line.lstrip(' '))
+
+
+def _plugins_key(lines):
+    import re
+    return next((i for i, l in enumerate(lines) if re.match(r'plugins:\s*(#.*)?$', l)), None)
+
+
+def _nevr_entries(lines):
+    """[(name, first line, end line)] for the items of config.yaml's top-level plugins: list."""
+    import re
+    start = _plugins_key(lines)
+    if start is None:
+        return []
+    out, i = [], start + 1
+    while i < len(lines):
+        l = lines[i]
+        if not l.strip() or l.lstrip().startswith('#'):
+            i += 1
+            continue
+        if _indent(l) == 0 and not l.startswith('-'):
+            break                                           # the next top-level key
+        if not l.lstrip().startswith('- '):
+            i += 1
+            continue
+        ind, j = _indent(l), i + 1
+        while j < len(lines) and (not lines[j].strip() or _indent(lines[j]) > ind):
+            j += 1
+        while j > i + 1 and not lines[j - 1].strip():       # blank lines after an item belong to no item
+            j -= 1
+        name = ''
+        for k in range(i, j):
+            m = re.match(r'(?:-\s+)?name:\s*["\']?([^"\'#]+?)["\']?\s*(#.*)?$', lines[k].strip())
+            if m:
+                name = m.group(1)
+                break
+        out.append((name, i, j))
+        i = j
+    return out
+
+
+def _set_nevr(game, present, log=print):
+    """Adds EchoLazyTablet to (or takes it out of) nEVR's config.yaml, leaving the rest as written."""
+    import re
+    path = _nevr_config()
+    lines = _nevr_lines()
+    for name, a, b in reversed(_nevr_entries(lines)):
+        if name.strip().lower() in OUR_NAMES:
+            del lines[a:b]
+    if present:
+        start = _plugins_key(lines)
+        if start is None:
+            empty = next((i for i, l in enumerate(lines) if re.match(r'plugins:\s*(\[\s*\]|null|~)?\s*(#.*)?$', l)), None)
+            if empty is not None:
+                lines[empty], start = 'plugins:', empty
+            elif any(l.startswith('plugins:') for l in lines):
+                raise InstallError(f'{path} lists its plugins in a form this installer does not edit. Add EchoLazyTablet '
+                                   'by hand under plugins: (name: EchoLazyTablet, early: true) and try again.')
+            else:
+                if lines and lines[-1].strip():
+                    lines.append('')
+                lines.append('plugins:')
+                start = len(lines) - 1
+        items = _nevr_entries(lines)
+        ind = _indent(lines[items[0][1]]) if items else 2
+        lines[start + 1:start + 1] = [' ' * ind + e for e in NEVR_ENTRY]
+    elif not path.exists():
+        return
+    else:
+        start = _plugins_key(lines)
+        if start is not None and not _nevr_entries(lines):
+            lines[start] = 'plugins: []'              # ours was the only one: keep it a list, not null
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _replace(path, ('\n'.join(lines) + '\n').encode())
+    log(f"nEVR: EchoLazyTablet {'added to' if present else 'taken out of'} {path}")
+
+
+def _retire_dbgcore(game, log=print):
+    """nEVR refuses to start beside a dbgcore.dll in the game folder: rename it as nEVR's message asks."""
+    import datetime
+    p = game.bin / 'dbgcore.dll'
+    if not p.exists():
+        return
+    stem = f'dbgcore.dll.legacy-{datetime.date.today():%Y%m%d}'
+    to, n = p.with_name(stem), 1
+    while to.exists():
+        to, n = p.with_name(f'{stem}-{n}'), n + 1
+    os.replace(p, to)
+    log(f"nEVR: renamed bin\\win10\\dbgcore.dll (EchoLoader) to {to.name}; nEVR won't start beside it.")
 
 
 def _write_game_data(game, m, new_package=None):
@@ -579,9 +698,13 @@ def install(game, log=print, stage=_no_stage):
                   manifest_sha256=E.sha256(game.manifest.read_bytes()))
     _replace(game.record, json.dumps(record, indent=1).encode())
     stage('plugin')
-    game.plugins.mkdir(exist_ok=True)
+    game.plugins.mkdir(parents=True, exist_ok=True)
     _replace(game.plugins / 'EchoLazyTablet.dll', (payload / 'EchoLazyTablet.dll').read_bytes())
     old_ini = game.plugins / OLD_INI
+    beside = game.bin / 'plugins' / 'EchoLazyTablet.ini'     # nEVR: the settings of an EchoLoader install
+    if game.nevr and not (game.plugins / 'EchoLazyTablet.ini').exists() and beside.exists():
+        _replace(game.plugins / 'EchoLazyTablet.ini', beside.read_bytes())
+        log("Your EchoLazyTablet settings were copied into nEVR's plugins folder.")
     if not (game.plugins / 'EchoLazyTablet.ini').exists():
         if old_ini.exists():   # from EchoQueue: the player's settings carry over
             _replace(game.plugins / 'EchoLazyTablet.ini', old_ini.read_bytes())
@@ -592,7 +715,15 @@ def install(game, log=print, stage=_no_stage):
         if (game.plugins / name).exists():
             (game.plugins / name).unlink()
     _replace(game.plugins / 'EchoLazyTablet.layout', tablet.layout_ini(built['layout']).encode())
-    _set_loader(game, True)
+    if game.nevr:
+        _retire_dbgcore(game, log)
+        for name in ('EchoLazyTablet.dll', 'EchoLazyTablet.layout'):   # an EchoLoader copy, which nEVR doesn't load
+            (game.bin / 'plugins' / name).unlink(missing_ok=True)
+        if (game.bin / 'echoloader.json').exists():
+            _set_loader(game, False)
+        _set_nevr(game, True, log)
+    else:
+        _set_loader(game, True)
     echomods_keep(game, True, log)
     log(f"Installed EchoLazyTablet v{VERSION}: PLAY tab added to package _{number}, {built['tabs']} tabs on the bar.")
     stage('graphics')
@@ -649,6 +780,9 @@ def uninstall(game, log=print, stage=_no_stage):
         p = game.plugins / name
         if p.exists():
             p.unlink()
-    _set_loader(game, False)
+    if game.nevr:
+        _set_nevr(game, False, log)
+    if (game.bin / 'echoloader.json').exists() or not game.nevr:
+        _set_loader(game, False)
     echomods_keep(game, False, log)
-    log('Removed the EchoLazyTablet plugin. Your settings (plugins\\EchoLazyTablet.ini) and log are kept.')
+    log(f'Removed the EchoLazyTablet plugin. Your settings ({game.plugins}\\EchoLazyTablet.ini) and log are kept.')
