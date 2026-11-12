@@ -70,7 +70,10 @@ def _signed(x):
 def unpack_container(raw):
     tag = raw[:4]
     if tag == b'ZSTD':
-        return zstandard.ZstdDecompressor().decompressobj().decompress(raw[0x18:])
+        try:
+            return zstandard.ZstdDecompressor().decompressobj().decompress(raw[0x18:])
+        except zstandard.ZstdError as e:
+            raise ValueError(f"the game's manifest file is damaged ({e}); put back the original or reinstall Echo VR") from None
     if tag == b'NONE':
         return raw[0x18:]
     raise ValueError(f'unknown container {tag!r}')
@@ -85,6 +88,13 @@ class MissingPackage(FileNotFoundError):
     def __init__(self, package):
         super().__init__(f'package _{package} is missing')
         self.package = package
+
+
+class BadPackage(ValueError):
+    """The manifest points into a package file, but what's there isn't the data it expects."""
+    def __init__(self, package, offset, csize, size, why):
+        super().__init__(f'package _{package} does not match the manifest at 0x{offset:x} ({why})')
+        self.package, self.offset, self.csize, self.size, self.why = package, offset, csize, size, why
 
 
 class Manifest:
@@ -130,10 +140,18 @@ class Manifest:
             path = (extra_packages or {}).get(package) or self.data / 'packages' / f'{MID}_{package}'
             if not Path(path).is_file():
                 raise MissingPackage(package)
+            size = Path(path).stat().st_size
             with open(path, 'rb') as f:
                 f.seek(offset)
                 block = f.read(csize)
-            self._cache[index] = zstandard.ZstdDecompressor().decompressobj().decompress(block)
+            if size < offset + csize:
+                raise BadPackage(package, offset, csize, size, 'the file is empty' if size == 0 else
+                                 f'the file ends early: {size} bytes, needs {offset + csize}')
+            try:
+                self._cache[index] = zstandard.ZstdDecompressor().decompressobj().decompress(block)
+            except zstandard.ZstdError as e:
+                why = ('that part of the file is all zeros' if not block.strip(bytes(1)) else str(e))
+                raise BadPackage(package, offset, csize, size, why) from None
         return self._cache[index]
 
     def get(self, type_sym, name_sym, extra_packages=None):

@@ -63,6 +63,8 @@ class State:
             else:
                 try:
                     result = dict(found=True, **patcher.scan(patcher.Game(path)))
+                except patcher.E.BadPackage as e:
+                    result = dict(found=True, state='unknown', problems=[patcher.bad_message(patcher.Game(path), e)], notes=[], plugins=[])
                 except Exception as e:
                     result = dict(found=True, state='unknown', problems=[f'Could not read the game data: {e}'], notes=[], plugins=[])
             with self.lock:

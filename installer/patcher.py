@@ -22,7 +22,7 @@ import echodata as E
 import graphics
 import tablet
 
-VERSION = '3.26'
+VERSION = '3.27'
 EXE_TIMESTAMP = 1683152886
 DATA = Path('_data/5932408047/rad15/win10')
 STOCK_PACKAGES = 3
@@ -68,6 +68,15 @@ def missing_message(game, package):
     return (f"Echo VR's data points at package _{package}, but that file is missing from the game folder "
             f"(packages\\{E.MID}_{package} in the game's _data folder).{what} {who}\n"
             f'Fix: {fix}, then press Check again.')
+
+
+def bad_message(game, e):
+    """Plain words for a package file that's there but doesn't hold what the manifest says it does."""
+    return (f"Echo VR's data doesn't match package _{e.package} (packages\\{E.MID}_{e.package} in the game's _data "
+            f"folder): {e.why}. The manifest and that package file come from different copies: most likely "
+            'another mod replaced one without the other, or the game folder was copied or downloaded badly.\n'
+            "Fix: undo that mod (its uninstall or restore), or put back the game's original manifests and packages "
+            'folders, or reinstall Echo VR, then press Check again.')
 
 
 def payload_dir():
@@ -467,6 +476,8 @@ def scan(game):
         info['problems'].append(str(e))
     except E.MissingPackage as e:
         info['problems'].append(missing_message(game, e.package))
+    except E.BadPackage as e:
+        info['problems'].append(bad_message(game, e))
     info['graphics'] = graphics.mode(game.folder)   # 'low' / 'high', or None (LOW not set up)
     info['echomods'] = echomods_present()
     if info['echomods'] and n is not None and echomods_snapshot_stale(game, record):
@@ -625,6 +636,8 @@ def _plain(fn):
             return fn(game, *args, **kwargs)
         except E.MissingPackage as e:
             raise InstallError(missing_message(game, e.package)) from None
+        except E.BadPackage as e:
+            raise InstallError(bad_message(game, e)) from None
     return wrapped
 
 

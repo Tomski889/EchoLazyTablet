@@ -1,4 +1,4 @@
-EchoLazyTablet 3.26 - Echo Arena and Echo Combat matchmaking from your hand tablet (Echo VR, EchoVRCE)
+EchoLazyTablet 3.27 - Echo Arena and Echo Combat matchmaking from your hand tablet (Echo VR, EchoVRCE)
 
 What it does
   A PLAY tab, second on the hand tablet's tab bar (after SFX, below):
@@ -74,6 +74,10 @@ Installing (players)
     Repair afterwards.
   * "Unknown error while loading the game" after updating EchoLazyTablet with another mod tool also
     installed: run this installer's Repair (3.22 and later put back the missing package file).
+  * "Echo VR's data doesn't match package _N" (3.26 said "zstd decompressor error: Unknown frame
+    descriptor"): that package file and the manifest come from different copies of the game, usually
+    because another mod replaced one of them. Undo that mod, or put back the original manifests and
+    packages folders, or reinstall Echo VR.
   * Uninstall puts back exactly what EchoLazyTablet replaced (stock data, or another mod's version)
     and keeps your settings.
   * Before each change the manifest is copied to manifests\48037dc70b0ecab2.echoqueue-backup.
