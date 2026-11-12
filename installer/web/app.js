@@ -18,10 +18,10 @@ const WRONG_BUILD = /Echo VR build is not the one/;
 const STAGES = {
   install: [['check', 'Checking your game'], ['build', 'Building your PLAY tab'], ['write', 'Installing the tab'],
             ['verify', 'Double-checking'], ['plugin', 'Adding the EchoLazyTablet plugin'],
-            ['graphics', 'Making the LOW graphics files (a minute or two)']],
+            ['graphics', 'Making the LOW graphics files (a minute or two)'], ['arms', 'Adding the hologram arms']],
   loader: [['loader', 'Downloading EchoLoader'], ['check', 'Checking your game'], ['build', 'Building your PLAY tab'],
            ['write', 'Installing the tab'], ['verify', 'Double-checking'], ['plugin', 'Adding the EchoLazyTablet plugin'],
-           ['graphics', 'Making the LOW graphics files (a minute or two)']],
+           ['graphics', 'Making the LOW graphics files (a minute or two)'], ['arms', 'Adding the hologram arms']],
   uninstall: [['check', 'Checking your game'], ['write', 'Taking the PLAY tab out'], ['plugin', 'Removing the plugin']],
 };
 

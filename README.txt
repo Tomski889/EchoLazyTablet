@@ -1,4 +1,4 @@
-EchoLazyTablet 3.25 - Echo Arena and Echo Combat matchmaking from your hand tablet (Echo VR, EchoVRCE)
+EchoLazyTablet 3.26 - Echo Arena and Echo Combat matchmaking from your hand tablet (Echo VR, EchoVRCE)
 
 What it does
   A PLAY tab, second on the hand tablet's tab bar (after SFX, below):
@@ -11,6 +11,8 @@ What it does
     from inside VR. The first time you open PLAY, the tablet asks for that hotkey on a keyboard
     page (KEY, next to CLIP, opens it again; NO CLIP APP if you don't use one); it's kept as
     [clip] keys in EchoLazyTablet.ini.
+    CLIP can press a second PC's hotkey too (it has to be running Echo with this plugin): [clip] send_to
+    on this PC, [clip] listen=1 on the other (both PCs on the same network, UDP port 6733).
   * A stats box (tap to switch): hours played today, matches overall, players online.
   * LAST THROW: the speed of your last disc throw (m/s), read from Echo's API in a match (needs
     API access on in Echo's settings); -- until you've thrown.
@@ -25,6 +27,16 @@ What it does
   * Sound output back when Echo closes: set [audio] after_echo in EchoLazyTablet.ini to your speakers'
     name, and Windows switches back to them from the headset.
   * Joining or leaving fades the headset to black (after [fade] delay_ms).
+  Hologram arms (new in 3.26): your chassis' arms become the loading screen's hologram arms, and a
+  HOLO tab on the tablet sets them up:
+  * A colour for BLUE TEAM, ORANGE TEAM and the LOBBY: tap anywhere on the colour field (or the grey
+    bar), then fine-tune with < COLOUR / COLOUR >, DARKER / LIGHTER and PALER / BOLDER. HOLOGRAM
+    BLUE puts the original colour back.
+  * RAINBOW: the arms cycle round the colour wheel, at speed 1 to 5.
+  * ARMS: SOLID, SEE-THROUGH, SOLID HANDS or CLEAR HANDS (just the hands). The tablet tries the new
+    look straight away; if your arms don't change, restart Echo VR.
+  The arms are built by the installer from your own copy of Echo VR (no game files are included).
+  Uninstalling takes them out again.
   An SFX tab, first on the tab bar: eight buttons that each press a key you pick, for Voicemod and other
   soundboards. Bind a sound to a key in your soundboard, then tap an empty button (or EDIT, then a
   button) and pick the same key on the tablet, then type a name for it (or NO NAME). They're kept as

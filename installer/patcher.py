@@ -22,7 +22,7 @@ import echodata as E
 import graphics
 import tablet
 
-VERSION = '3.25'
+VERSION = '3.26'
 EXE_TIMESTAMP = 1683152886
 DATA = Path('_data/5932408047/rad15/win10')
 STOCK_PACKAGES = 3
@@ -639,6 +639,85 @@ def fill_gaps(game, m, log=print):
             log(f'Package _{n} was missing (Echo VR would not load): put an empty one back.')
 
 
+
+# ---- hologram arms ----
+# The loading screen's hologram arms on every chassis, with the tablet's HOLO page (colour, rainbow,
+# ARMS looks). They're built at install time from the player's own game data by echo-modding-tool's
+# holo_whole (payload/arms), and installed by its install_flat into a package of their own, with a
+# manifest kept for each ARMS look (.holo-solid / -clear / -hands / -clear-hands; the plugin swaps
+# them). install_flat --revert takes them out again.
+ARMS_DIR = 'arms'
+ARMS_LOOKS = ('solid', 'clear', 'hands', 'clear-hands')
+ARMS_BUILD_ENV = dict(HOLO_KEEP='46adff5980245670,b7d338793fa37832,230554bc3beca38c,c2434c5a99e139ce,7b9a4c9fd03f37eb',
+                      HOLO_SIGNATURE='1', HOLO_PIECES='1', HOLO_LAYER_TEST='1', HOLO_ALT_CLEAR='1', HOLO_ALT_HANDS='1',
+                      HOLO_CLEAR_GROUPS=','.join(f'{s}:000c_0001' for s in range(6)))
+
+
+def arms_tools():
+    d = payload_dir() / ARMS_DIR
+    return d if all((d / f'{n}.exe').is_file() for n in ('holo_whole', 'install_flat', 'verify_flat')) else None
+
+
+def _arms_run(game, tool, *args, **env):
+    import subprocess
+    full = dict(os.environ, ECHO_DIR=str(game.folder), ECHOTOOL_LOW_TEXTURES='1', **env)
+    full.pop('ECHO_MANIFEST', None)
+    r = subprocess.run([str(arms_tools() / f'{tool}.exe'), *map(str, args)], env=full, capture_output=True,
+                       text=True, errors='replace', creationflags=0x08000000)   # CREATE_NO_WINDOW
+    if r.returncode != 0:
+        raise InstallError(f'Hologram arms: {tool} failed:\n' + (r.stdout + r.stderr).strip()[-1500:])
+    return r.stdout
+
+
+def arms_installed(game):
+    return any(game.manifests.glob(f'{game.manifest.name}.holo-*'))
+
+
+def arms_revert(game, log=print):
+    """Takes the hologram arms (anything install_flat put in) out; nothing if they aren't in."""
+    if arms_tools() and (arms_installed(game) or (game.manifests / f'{game.manifest.name}.echotool').exists()):
+        out = _arms_run(game, 'install_flat', '--revert')
+        log('Took the hologram arms out of the game data.' if 'Nothing' not in out else 'The hologram arms were not in.')
+
+
+def _chosen_look(game):
+    import configparser
+    c = configparser.ConfigParser(strict=False)
+    try:
+        c.read(game.plugins / 'EchoLazyTablet.ini', encoding='utf-8-sig')
+        look = c.get('holo', 'arms', fallback='solid').strip()
+    except Exception:
+        look = 'solid'
+    return look if look in ARMS_LOOKS else 'solid'
+
+
+def arms_install(game, log=print):
+    """Builds the hologram arms from this game's data and installs them; the ARMS look last chosen
+    on the tablet is put on. Call with everything else installed (install_flat keeps what's there)."""
+    import tempfile
+    with tempfile.TemporaryDirectory(prefix='elt-arms-') as tmp:
+        staging = Path(tmp) / 'staging'
+        _arms_run(game, 'holo_whole', staging, **ARMS_BUILD_ENV)
+        _arms_run(game, 'install_flat', staging)
+        report = _arms_run(game, 'verify_flat', staging)
+    bad = [l for l in report.splitlines() if 'staged files identical' in l and not l.rstrip().endswith('different 0, missing 0')]
+    if bad or 'staged files identical' not in report:
+        raise InstallError('Hologram arms: the game data did not read back correctly:\n' + report.strip()[-1500:])
+    look = _chosen_look(game)
+    if look != 'solid':
+        live = game.manifest
+        now = live.read_bytes()
+        nxt = (live.parent / f'{live.name}.holo-{look}').read_bytes()
+        for potato in ('.potato-high', '.potato-low'):
+            p, want = live.parent / f'{live.name}{potato}', live.parent / f'{live.name}{potato}.holo-{look}'
+            if p.exists() and want.exists():
+                if p.read_bytes() == now:
+                    nxt = want.read_bytes()
+                _replace(p, want.read_bytes())
+        _replace(live, nxt)
+    log(f'Installed the hologram arms (ARMS: {look.upper().replace("-", " ")}); change them on the tablet\'s HOLO page.')
+
+
 @_plain
 def install(game, log=print, stage=_no_stage):
     """Install, or repair: EchoLazyTablet out, then the tab rebuilt on the tablet as it is now.
@@ -650,6 +729,9 @@ def install(game, log=print, stage=_no_stage):
     payload = payload_dir()
     if not (payload / 'EchoLazyTablet.dll').is_file():
         raise InstallError('The installer is missing EchoLazyTablet.dll.')
+    # the hologram arms come out first (they're put back last, on top of everything else)
+    arms = arms_tools() is not None
+    arms_revert(game, log)
     # The GRAPHICS LOW files are built from the tablet data as it ends up: the game's own manifest
     # back first (the player's choice of HIGH or LOW is kept), LOW rebuilt at the end.
     was_low = graphics.is_low(game.folder)
@@ -660,7 +742,7 @@ def install(game, log=print, stage=_no_stage):
         log(f'Took the existing EchoLazyTablet out of the tablet data (package _{old}).')
     stage('build')
     try:
-        built = tablet.build(m)
+        built = tablet.build(m, holo=True if arms else None)
     except tablet.TabletError as e:
         raise InstallError(str(e))
     for note in built['details']:
@@ -735,6 +817,16 @@ def install(game, log=print, stage=_no_stage):
     except Exception as e:   # the PLAY tab works without it; the GRAPHICS box then says NOT SET UP
         graphics.undo(game.folder, lambda _: None)
         log(f'Low graphics could not be set up ({e}); everything else is installed.')
+    if arms:
+        stage('arms')
+        try:
+            arms_install(game, log)
+        except Exception as e:   # the PLAY tab works without them
+            log(f'The hologram arms could not be installed ({e}); everything else is installed.')
+            try:
+                arms_revert(game, lambda _: None)
+            except Exception:
+                pass
     return built
 
 
@@ -758,6 +850,7 @@ def uninstall(game, log=print, stage=_no_stage):
         raise InstallError('\n'.join(problems))
     if echo_running():
         raise InstallError('Echo VR is running. Close it first.')
+    arms_revert(game, log)
     graphics.undo(game.folder, log)
     m, n, unused = without_echoqueue(game)
     fill_gaps(game, m, log)

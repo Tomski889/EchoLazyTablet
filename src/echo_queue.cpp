@@ -34,6 +34,8 @@
 //   Tablet: 0x71fc90 canvas loaded, 0x7287b0 canvas unload, 0x71c820 element show,
 //   0x727f10 element text, 0x726f00 canvas alpha, 0x92f3f0 button update (game thread),
 //   0x92b9e0 / 0x92bd10 button disable / enable, 0x510060 event dispatch.
+#include <winsock2.h>
+#include <ws2tcpip.h>
 #include "../vendor/minhook/include/MinHook.h"
 #include "generated/queue_tab.h"
 #include <windows.h>
@@ -1512,6 +1514,11 @@ void joinTick() {
     startFade(WM_JOIN, "joining the match");
 }
 
+namespace remoteclip {
+bool hasTarget();
+void shareMatch(const std::string& id);
+}
+
 // ---- Echo's API ----
 // GET /session from Echo's own HTTP API into `body`: the HTTP status (200 in a match, an
 // error in the lobby), or 0 when nothing answers.
@@ -1574,6 +1581,530 @@ std::string jsonString(const std::string& body, const char* key) {
     size_t end = body.find('"', i + 1);
     return end == std::string::npos ? "" : body.substr(i + 1, end - i - 1);
 }
+
+// ---- HOLO: the hologram chassis mod's arm colours ----
+// The hologram chassis mod (echo-modding-tool holo_whole.rs) gives the first-person Series 11 the
+// loading screen's hologram arms; their colour is three rgb values in each of its materials' value
+// blocks (+0x34, +0xd4, +0x2e4 of a 0x47c-byte block), which the game reads every frame from its
+// loaded copies. The mod ships them as the hologram's own blue with every float's lowest bit flipped:
+// no other material has those bits, so the loaded copies can be found in memory without shipping
+// any game data. A thread finds them (after loads), then keeps them at the colour picked on the HOLO
+// page for where the player is: blue team, orange team or anywhere else (the lobby, spectating).
+// ARMS SOLID / SEE-THROUGH (defined with the manifest code below): -> what to flash.
+std::string switchArmsLook(int look);
+int armsLookShown();
+
+namespace holo {
+constexpr size_t BLOCK = 0x47c;
+constexpr size_t COLOURS[3] = {0x34, 0xd4, 0x2e4};
+constexpr uint32_t SIGN_D4[3] = {0x3e405442, 0x3f40c0d7, 0x3f800001};
+constexpr uint32_t SIGN_2E4[3] = {0x3dd16460, 0x3f26c287, 0x3f800001};
+enum Where { BLUE = 0, ORANGE = 1, LOBBY = 2 };
+
+// What each bar (blue team, orange team, lobby) is set to: any colour (red, green, blue 0-255, as the
+// tablet shows it), the hologram's own colour (holo) or a cycling rainbow (at the colour's saturation
+// and brightness). `hue` keeps the hue while the colour is grey. Guarded by `lock`.
+struct Setting {
+    int rgb[3] = {48, 191, 255};   // (the hologram's blue, as near as the tablet shows it)
+    float hue = 197;
+    bool holo = true, rainbow = false;
+};
+constexpr float SPEEDS[HOLO_SPEEDS] = {10, 25, 50, 100, 200};   // rainbow: degrees per second
+std::mutex lock;
+Setting settings[HOLO_BAR_COUNT];
+int speed = 2;                   // rainbow speed (SPEEDS index); the rainbow is whole arms (bands
+                                 // per piece looked blocky, 12 Nov)
+std::atomic<int> editing{0};     // the bar the HOLO page edits
+std::atomic<int> where{LOBBY};   // the bar in use
+std::atomic<int> found{-1};      // copies being kept (-1 not looked yet)
+std::atomic<bool> rescan{false};
+// ARMS live (12 Nov test): the arm piece materials Echo is drawing with are loaded whole, header and
+// all, so each found copy whose header is ours has its draw group (file @0x18, = copy - 0x190) and
+// flags (@0x1c) right there. A look tapped on the tablet is written into them at once (the manifest
+// is still swapped for the next start, in case the game only reads them when it loads).
+std::atomic<int> liveLook{-1};
+// per look (SOLID, SEE-THROUGH, SOLID HANDS, CLEAR HANDS) and piece: group | blend, flags (as
+// holo_whole stages them: solid = group 1 with depth bit 0x2 on pieces 0, 3, 5; see-through =
+// group 0xc; hands looks hide the forearms and upper arms, pieces 0-3, with group 0xe)
+void lookHeader(int look, int piece, uint32_t& group, uint32_t& flags) {
+    bool clear = look == 1 || look == 3, hide = (look == 2 || look == 3) && piece < 4;
+    group = hide ? 0x000e0001 : clear ? 0x000c0001 : 0x00010001;
+    flags = !clear && (piece == 0 || piece == 3 || piece == 5) ? 0xba0e : 0xba0c;
+}
+
+struct Block {
+    uintptr_t base;
+    int piece;                   // the arm piece (0 for a mod without pieces: all the same)
+    std::vector<uint8_t> snap;   // the block as found (colours aside): it must still be that to be written
+    float orig[3][3];            // its colours as found (the signed blue)
+};
+
+bool masked(size_t i) {
+    for (size_t c : COLOURS)
+        if (i >= c && i < c + 12) return true;
+    return false;
+}
+
+bool readSelf(uintptr_t at, void* out, size_t n) {
+    SIZE_T got = 0;
+    return ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<LPCVOID>(at), out, n, &got) && got == n;
+}
+
+// Every signed copy in plain read-write memory (the game's loaded data; its GPU upload buffers are
+// write-combined and rebuilt from these each frame, so they're skipped).
+std::vector<Block> scan() {
+    std::vector<Block> out;
+    std::vector<uint8_t> buf(4 << 20);
+    MEMORY_BASIC_INFORMATION mbi;
+    for (uintptr_t at = 0x10000; VirtualQuery(reinterpret_cast<LPCVOID>(at), &mbi, sizeof mbi); at = uintptr_t(mbi.BaseAddress) + mbi.RegionSize) {
+        if (mbi.State != MEM_COMMIT || mbi.Type != MEM_PRIVATE || mbi.Protect != PAGE_READWRITE) continue;
+        uintptr_t start = uintptr_t(mbi.BaseAddress), end = start + mbi.RegionSize;
+        for (uintptr_t chunk = start; chunk < end; chunk += buf.size() - 16) {
+            size_t n = std::min<uintptr_t>(buf.size(), end - chunk);
+            if (n < 12 || !readSelf(chunk, buf.data(), n)) break;
+            for (size_t i = 0; i + 12 <= n; i += 4) {
+                uint32_t w;
+                memcpy(&w, &buf[i], 4);
+                if (w != SIGN_D4[0] || memcmp(&buf[i], SIGN_D4, 12) != 0) continue;
+                uintptr_t base = chunk + i - COLOURS[1];
+                Block b{base, 0, std::vector<uint8_t>(BLOCK), {}};
+                uint32_t blue;
+                if (!readSelf(base, b.snap.data(), BLOCK) || memcmp(&b.snap[COLOURS[2]], SIGN_2E4, 8) != 0) continue;
+                memcpy(&blue, &b.snap[COLOURS[2] + 8], 4);
+                if ((blue & ~0xeu) != SIGN_2E4[2] || ((blue >> 1) & 7) > 5) continue;
+                b.piece = int((blue >> 1) & 7);
+                uint32_t z;
+                memcpy(&z, &b.snap[COLOURS[0] + 8], 4);
+                if (z != 0x3f800001) continue;
+                for (int c = 0; c < 3; c++) memcpy(b.orig[c], &b.snap[COLOURS[c]], 12);
+                bool known = false;
+                for (auto& o : out) known |= o.base == base;
+                if (!known) out.push_back(std::move(b));
+            }
+            if (n < buf.size()) break;
+        }
+    }
+    return out;
+}
+
+// Probe (12 Nov, read-only, once a start): where does the game keep each arm piece material's draw
+// group (file header u32 @0x18 = group << 16 | blend)? The installed looks give the pieces groups
+// 1 (solid), 0xc (see-through) and 0xe (hidden), all loaded at once. Every pointer into a found copy
+// is a runtime object using it; the group-like u32s around each are written to
+// EchoLazyTablet.probe.log, with a tally by offset, to find a field the tablet could flip live.
+void probe(const std::vector<Block>& found) {
+    std::vector<uintptr_t> bases;
+    for (auto& b : found) bases.push_back(b.base);
+    std::sort(bases.begin(), bases.end());
+    FILE* out = _wfopen((dir + L"\\EchoLazyTablet.probe.log").c_str(), L"w");
+    if (!out) return;
+    U begin = GetTickCount64();
+    fprintf(out, "%zu copies, arms this start: %d\n", bases.size(), int(armsLookShown()));
+    for (auto& b : found) fprintf(out, "copy %llx piece %d\n", (unsigned long long)b.base, b.piece);
+    auto isGroup = [](uint32_t v) { return (v >> 16) >= 1 && (v >> 16) <= 0xf && (v & 0xffff) < 8; };
+    std::map<std::pair<int, uint32_t>, int> tally;
+    std::vector<uint8_t> buf(4 << 20);
+    size_t hits = 0;
+    MEMORY_BASIC_INFORMATION mbi;
+    for (uintptr_t at = 0x10000; VirtualQuery(reinterpret_cast<LPCVOID>(at), &mbi, sizeof mbi); at = uintptr_t(mbi.BaseAddress) + mbi.RegionSize) {
+        if (mbi.State != MEM_COMMIT || mbi.Type != MEM_PRIVATE || mbi.Protect != PAGE_READWRITE) continue;
+        uintptr_t start = uintptr_t(mbi.BaseAddress), end = start + mbi.RegionSize;
+        // chunks overlap by 0x400 so every pointer has 0x200 either side in some chunk
+        for (uintptr_t chunk = start; chunk < end; chunk += buf.size() - 0x400) {
+            size_t n = std::min<uintptr_t>(buf.size(), end - chunk);
+            if (n < 16 || !readSelf(chunk, buf.data(), n)) break;
+            size_t from = chunk == start ? 0 : 0x200, to = n < buf.size() ? n : n - 0x200;
+            for (size_t i = from; i + 8 <= to; i += 8) {
+                uintptr_t v;
+                memcpy(&v, &buf[i], 8);
+                if (v < 0x10000) continue;
+                auto k = std::upper_bound(bases.begin(), bases.end(), v + 0x200);
+                if (k == bases.begin()) continue;
+                uintptr_t c = *(k - 1);
+                if (v + 0x200 < c || v >= c + BLOCK) continue;
+                if (chunk + i >= c && chunk + i < c + BLOCK) continue;   // inside a copy itself
+                hits++;
+                std::string around;
+                for (size_t p = i >= 0x200 ? i - 0x200 : 0; p + 4 <= std::min(n, i + 0x200); p += 4) {
+                    uint32_t g;
+                    memcpy(&g, &buf[p], 4);
+                    if (!isGroup(g)) continue;
+                    int off = int(p) - int(i);
+                    tally[{off, g}]++;
+                    char s[32];
+                    snprintf(s, sizeof s, " %c%x:%08x", off < 0 ? '-' : '+', unsigned(off < 0 ? -off : off), g);
+                    around += s;
+                }
+                if (hits <= 400)
+                    fprintf(out, "ptr %llx -> copy %llx %+d:%s\n", (unsigned long long)(chunk + i), (unsigned long long)c, int(v - c), around.c_str());
+            }
+            if (n < buf.size()) break;
+        }
+    }
+    fprintf(out, "%zu pointers, %llu ms\ngroup-like values by offset from the pointer (2+):\n", hits, GetTickCount64() - begin);
+    for (auto& [key, count] : tally)
+        if (count >= 2) fprintf(out, "  %+d %08x: %d\n", key.first, key.second, count);
+    fclose(out);
+    logf("holo: probe: %zu pointers into %zu copies (EchoLazyTablet.probe.log)", hits, bases.size());
+}
+
+void hsv(float h, float s, float v, float out[3]) {   // h in degrees, s and v 0-1
+    h = std::fmod(std::fmod(h, 360.f) + 360.f, 360.f) / 60;
+    float x = 1 - std::fabs(std::fmod(h, 2.f) - 1);
+    const float table[6][3] = {{1, x, 0}, {x, 1, 0}, {0, 1, x}, {0, x, 1}, {x, 0, 1}, {1, 0, x}};
+    for (int k = 0; k < 3; k++) out[k] = v * (1 - s + s * table[std::min(int(h), 5)][k]);
+}
+
+// A setting's hue (degrees), saturation and brightness (0-1).
+void toHsv(const Setting& t, float& h, float& s, float& v) {
+    int hi = std::max({t.rgb[0], t.rgb[1], t.rgb[2]}), lo = std::min({t.rgb[0], t.rgb[1], t.rgb[2]});
+    v = hi / 255.f;
+    s = hi ? float(hi - lo) / hi : 0;
+    h = t.hue;
+    if (hi == lo) return;
+    float d = float(hi - lo), r = float(t.rgb[0]), g = float(t.rgb[1]), b = float(t.rgb[2]);
+    h = hi == t.rgb[0] ? 60 * std::fmod((g - b) / d + 6, 6.f) : hi == t.rgb[1] ? 60 * ((b - r) / d + 2) : 60 * ((r - g) / d + 4);
+}
+
+void fromHsv(Setting& t, float h, float s, float v) {
+    float rgb[3];
+    hsv(h, s, v, rgb);
+    for (int k = 0; k < 3; k++) t.rgb[k] = int(std::lround(rgb[k] * 255));
+    t.hue = std::fmod(std::fmod(h, 360.f) + 360.f, 360.f);
+}
+
+// The same in HSL (what the page's colour field, LIGHT and STRENGTH work in): l 0 black .. 1 white.
+void hsl(float h, float s, float l, float out[3]) {
+    float v = l + s * std::min(l, 1 - l);
+    hsv(h, v > 0 ? 2 * (1 - l / v) : 0, v, out);
+}
+
+void toHsl(const Setting& t, float& h, float& s, float& l) {
+    float sv, v;
+    toHsv(t, h, sv, v);
+    l = v * (1 - sv / 2);
+    s = l > 0 && l < 1 ? (v - l) / std::min(l, 1 - l) : 0;
+}
+
+void fromHsl(Setting& t, float h, float s, float l) {
+    float rgb[3];
+    hsl(h, s, l, rgb);
+    for (int k = 0; k < 3; k++) t.rgb[k] = int(std::lround(rgb[k] * 255));
+    t.hue = std::fmod(std::fmod(h, 360.f) + 360.f, 360.f);
+}
+
+// The rainbow's hue now (degrees), the same for every bar so a change of side doesn't jump.
+float rainbowHue() {   // (the performance counter: GetTickCount64 only moves every 16 ms, which stutters)
+    return float(std::fmod(double(qpcNs()) / 1e9 * SPEEDS[speed], 360.0));
+}
+
+// The three colours a block gets: the hologram's own (as shipped) or the picked colour made linear
+// (the material's values are; the tablet's swatches aren't) with a little of the original's
+// paleness mixed in (all of it washed colours out, 11 Nov).
+void colours(const Block& b, const Setting& set, float hue, float out[3][3]) {
+    float rgb[3], h, sat, light;
+    toHsl(set, h, sat, light);
+    if (set.rainbow) hsl(hue, sat, light, rgb);
+    else for (int k = 0; k < 3; k++) rgb[k] = set.rgb[k] / 255.f;
+    float val = std::max({rgb[0], rgb[1], rgb[2]});
+    for (int c = 0; c < 3; c++) {
+        // a quarter of the original's paleness, less for darker colours (so black is black)
+        float white = 0.25f * std::min({b.orig[c][0], b.orig[c][1], b.orig[c][2]}) * val;
+        for (int k = 0; k < 3; k++) {
+            float lin = std::pow(rgb[k], 2.2f);
+            out[c][k] = set.holo && !set.rainbow ? b.orig[c][k] : lin + (1 - lin) * white;
+        }
+    }
+}
+
+// Where the player is, from Echo's API (its own connection: apiSession's belongs to matchWatch).
+int askWhere() {
+    static HINTERNET session = nullptr, connection = nullptr;
+    if (!session) {
+        session = WinHttpOpen(L"EchoLazyTablet", WINHTTP_ACCESS_TYPE_NO_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+        if (!session) return LOBBY;
+        WinHttpSetTimeouts(session, 300, 300, 300, 500);
+        connection = WinHttpConnect(session, L"127.0.0.1", API_PORT, 0);
+    }
+    if (!connection) return LOBBY;
+    HINTERNET request = WinHttpOpenRequest(connection, L"GET", L"/session", nullptr, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, 0);
+    if (!request) return LOBBY;
+    DWORD status = 0, size = sizeof status;
+    if (!WinHttpSendRequest(request, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0, 0) || !WinHttpReceiveResponse(request, nullptr) ||
+        !WinHttpQueryHeaders(request, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_HEADER_NAME_BY_INDEX, &status, &size, WINHTTP_NO_HEADER_INDEX))
+        status = 0;
+    std::string body;
+    char buffer[4096];
+    DWORD read = 0;
+    while (status == 200 && WinHttpReadData(request, buffer, sizeof buffer, &read) && read) body.append(buffer, read);
+    WinHttpCloseHandle(request);
+    if (status != 200 || jsonString(body, "match_type").rfind("Social", 0) == 0) return LOBBY;
+    std::string me = jsonString(body, "client_name");
+    size_t teams = body.find("\"teams\"");
+    if (me.empty() || teams == std::string::npos) return LOBBY;
+    // Each team object in turn: the one listing the player by name says which side they're on.
+    size_t i = body.find('[', teams);
+    while (i != std::string::npos && i < body.size()) {
+        size_t open = body.find('{', i), close = open;
+        if (open == std::string::npos) break;
+        int depth = 0;
+        bool quoted = false;
+        for (; close < body.size(); close++) {
+            char ch = body[close];
+            if (quoted) { if (ch == '\\') close++; else if (ch == '"') quoted = false; }
+            else if (ch == '"') quoted = true;
+            else if (ch == '{') depth++;
+            else if (ch == '}' && --depth == 0) break;
+        }
+        std::string team = body.substr(open, close - open + 1);
+        size_t at = team.find("\"" + me + "\"");
+        if (at != std::string::npos) {
+            std::string name;   // the team's own "team" key (its players' objects don't have one)
+            for (size_t k = team.find("\"team\""); k != std::string::npos; k = team.find("\"team\"", k + 1))
+                if (std::string v = jsonString(team.substr(k), "team"); !v.empty()) { name = v; break; }
+            if (name.find("BLUE") != std::string::npos) return BLUE;
+            if (name.find("ORANGE") != std::string::npos) return ORANGE;
+            return LOBBY;   // spectating
+        }
+        i = close + 1;
+        size_t next = body.find_first_not_of(" \t\r\n,", i);
+        if (next == std::string::npos || body[next] != '{') break;
+    }
+    return LOBBY;
+}
+
+const wchar_t* const KEYS[HOLO_BAR_COUNT] = {L"blue_v4", L"orange_v4", L"lobby_v4"};   // (earlier pages used blue / blue_hue / blue_v3 ...)
+
+void save(unsigned bar) {   // under lock
+    const Setting& t = settings[bar];
+    wchar_t v[96];
+    swprintf(v, 96, L"%d,%d,%d,%d,%d,%d", t.rgb[0], t.rgb[1], t.rgb[2], int(std::lround(t.hue)), int(t.holo), int(t.rainbow));
+    WritePrivateProfileStringW(L"holo", KEYS[bar], v, iniPath().c_str());
+}
+
+void load() {
+    std::lock_guard<std::mutex> g(lock);
+    settings[ORANGE].holo = false;
+    fromHsv(settings[ORANGE], 25, 1, 1);
+    for (unsigned b = 0; b < HOLO_BAR_COUNT; b++) {
+        wchar_t v[96];
+        GetPrivateProfileStringW(L"holo", KEYS[b], L"", v, 96, iniPath().c_str());
+        int x[6];
+        if (swscanf(v, L"%d,%d,%d,%d,%d,%d", &x[0], &x[1], &x[2], &x[3], &x[4], &x[5]) != 6) continue;
+        Setting& t = settings[b];
+        for (int k = 0; k < 3; k++) t.rgb[k] = std::max(0, std::min(255, x[k]));
+        t.hue = float(std::max(0, std::min(359, x[3]))), t.holo = x[4] != 0, t.rainbow = x[5] != 0;
+    }
+    speed = std::max(0, std::min(int(HOLO_SPEEDS) - 1, int(GetPrivateProfileIntW(L"holo", L"rainbow_speed", 2, iniPath().c_str()))));
+}
+
+// A HOLO page control was tapped, or a - / + held (HOLO_CONTROLS index): -> what to flash ("" nothing).
+std::string press(unsigned control) {
+    if (control >= HOLO_LOOK_FIRST && control < HOLO_LOOK_FIRST + HOLO_LOOKS) return switchArmsLook(int(control - HOLO_LOOK_FIRST));
+    std::lock_guard<std::mutex> g(lock);
+    if (control < HOLO_BAR_COUNT) { editing = int(control); return std::string("EDITING ") + HOLO_BAR_LABELS[control]; }
+    unsigned bar = unsigned(editing.load());
+    Setting& t = settings[bar];
+    std::string what;
+    float h, sat, light;
+    toHsl(t, h, sat, light);
+    if (control == HOLO_RAINBOW) { t.rainbow = !t.rainbow; what = t.rainbow ? "RAINBOW ON" : "RAINBOW OFF"; }
+    else if (control == HOLO_RESET) { t = Setting{}; what = "HOLOGRAM BLUE"; }
+    else if (control >= HOLO_SPEED_FIRST && control < HOLO_SPEED_FIRST + HOLO_SPEEDS) {
+        speed = int(control - HOLO_SPEED_FIRST);
+        WritePrivateProfileStringW(L"holo", L"rainbow_speed", std::to_wstring(speed).c_str(), iniPath().c_str());
+        return "RAINBOW SPEED " + std::to_string(speed + 1);
+    } else if (control >= HOLO_FINE_FIRST && control < HOLO_FINE_FIRST + 2 * HOLO_FINE) {
+        // the fine-tune buttons: 3 degrees of COLOUR, 2% of BRIGHTNESS (lightness) or 4% of
+        // VIVIDNESS (saturation) a step (from a grey, COLOUR brings the colour back at full
+        // vividness, or nothing would change)
+        unsigned row = (control - HOLO_FINE_FIRST) / 2;
+        int step = (control - HOLO_FINE_FIRST) % 2 ? 1 : -1;
+        if (row == 0) {
+            h += 3 * step;
+            if (sat < .05f) sat = 1;
+            if (light < .03f || light > .97f) light = .5f;
+            t.rainbow = false;
+        } else if (row == 1) light = std::max(0.f, std::min(1.f, light + step * .02f));
+        else sat = std::max(0.f, std::min(1.f, sat + step * .04f));
+        fromHsl(t, h, sat, light);
+        t.holo = false;
+    } else if (control >= HOLO_FIELD_FIRST && control < HOLO_FIELD_FIRST + HOLO_FIELD_COLS * HOLO_FIELD_ROWS) {
+        // the colour at the touch area's centre (the field is drawn from the same sums)
+        unsigned i = control - HOLO_FIELD_FIRST, r = i / HOLO_FIELD_COLS, c = i % HOLO_FIELD_COLS;
+        fromHsl(t, (c + .5f) / HOLO_FIELD_COLS * 360, 1, HOLO_FIELD_TOP - HOLO_FIELD_SPAN * (r + .5f) / HOLO_FIELD_ROWS);
+        t.holo = t.rainbow = false;
+    } else if (control >= HOLO_GREY_FIRST && control < HOLO_GREY_FIRST + HOLO_GREYS) {
+        int grey = int(std::lround(255 * (1 - float(control - HOLO_GREY_FIRST) / (HOLO_GREYS - 1))));
+        for (int& k : t.rgb) k = grey;   // (the hue stays, for COLOUR + / - from here)
+        t.holo = t.rainbow = false;
+    } else return "";
+    save(bar);
+    logf("holo: %s = %d,%d,%d hue %.0f%s%s", HOLO_BAR_LABELS[bar], t.rgb[0], t.rgb[1], t.rgb[2], t.hue, t.holo ? " holo" : "", t.rainbow ? " rainbow" : "");
+    return what;
+}
+
+// For the page, of the bar being edited: which highlights to show (the ring on the field or grey
+// bar nearest the colour), the three value texts, the hex code and the colour (0-1, as the tablet
+// shows it; while RAINBOW is on, the rainbow's now).
+struct View {
+    bool lit[HOLO_CONTROL_COUNT];
+    std::string hex;
+    float colour[3];
+    float fine[2 * HOLO_FINE][3], fineText[2 * HOLO_FINE][3];   // the buttons' fills and words
+};
+
+void view(View& out) {
+    int look = armsLookShown();   // (outside the lock: it reads no settings)
+    std::lock_guard<std::mutex> g(lock);
+    int bar = editing;
+    const Setting& t = settings[bar];
+    for (bool& l : out.lit) l = false;
+    out.lit[bar] = true;
+    out.lit[HOLO_RAINBOW] = t.rainbow;
+    out.lit[HOLO_RESET] = t.holo && !t.rainbow;
+    out.lit[HOLO_SPEED_FIRST + speed] = true;
+    if (look >= 0) out.lit[HOLO_LOOK_FIRST + look] = true;
+    float h, sat, light;
+    toHsl(t, h, sat, light);
+    if (!t.holo && !t.rainbow) {
+        if (sat < .12f) {
+            float grey = (t.rgb[0] + t.rgb[1] + t.rgb[2]) / (3 * 255.f);
+            out.lit[HOLO_GREY_FIRST + int(std::lround((1 - grey) * (HOLO_GREYS - 1)))] = true;
+        } else {
+            int c = int(h / 360 * HOLO_FIELD_COLS) % int(HOLO_FIELD_COLS);
+            int r = std::max(0, std::min(int(HOLO_FIELD_ROWS) - 1, int(std::floor((HOLO_FIELD_TOP - light) / HOLO_FIELD_SPAN * HOLO_FIELD_ROWS))));
+            out.lit[HOLO_FIELD_FIRST + r * HOLO_FIELD_COLS + c] = true;
+        }
+    }
+    float shown = t.rainbow ? rainbowHue() : h;
+    // each fine-tune button filled with where a few taps of it lead (one step wouldn't show), its
+    // words dark on a light fill; from a grey, COLOUR shows the colour coming back
+    {
+        float base = t.holo ? 0.f : sat, hs = base < .05f ? 1.f : base, hlight = base < .05f && (light < .03f || light > .97f) ? .5f : light;
+        float lead[2 * HOLO_FINE][3] = {{shown - 24, hs, hlight}, {shown + 24, hs, hlight},
+                                        {shown, sat, std::max(0.f, light - .15f)}, {shown, sat, std::min(1.f, light + .15f)},
+                                        {shown, std::max(0.f, sat - .4f), light}, {shown, std::min(1.f, sat + .4f), light}};
+        for (unsigned i = 0; i < 2 * HOLO_FINE; i++) {
+            if (t.holo && !t.rainbow) for (int k = 0; k < 3; k++) out.fine[i][k] = .16f + .02f * k;   // HOLOGRAM BLUE: plain buttons
+            else hsl(lead[i][0], lead[i][1], lead[i][2], out.fine[i]);
+            float luma = .3f * out.fine[i][0] + .59f * out.fine[i][1] + .11f * out.fine[i][2];
+            for (int k = 0; k < 3; k++) out.fineText[i][k] = luma > .55f ? .08f : 1.f;
+        }
+    }
+    if (t.rainbow) hsl(shown, sat, light, out.colour);
+    else for (int k = 0; k < 3; k++) out.colour[k] = t.rgb[k] / 255.f;
+    char hex[16];
+    snprintf(hex, sizeof hex, t.rainbow ? "RAINBOW" : t.holo ? "HOLO BLUE" : "#%02X%02X%02X", t.rgb[0], t.rgb[1], t.rgb[2]);
+    out.hex = hex;
+}
+
+// Copies the scout has found, for the writer to take on.
+std::mutex foundLock;
+std::vector<Block> fresh;
+
+// The scout: where the player is (Echo's API, every 2 s) and the memory search (slow: seconds), on
+// a thread of its own so the writer never waits on it.
+DWORD WINAPI scout(LPVOID) {
+    U scannedAt = 0, askedAt = 0, whereChangedAt = 0;
+    int lastWhere = -1;
+    for (;;) {
+        Sleep(250);
+        U t = GetTickCount64();
+        if (t - askedAt >= 2000) {
+            askedAt = t;
+            int w = askWhere();
+            if (w != lastWhere) {
+                static const char* names[] = {"blue team", "orange team", "the lobby / spectating"};
+                logf("holo: on %s", names[w]);
+                where = w, lastWhere = w, whereChangedAt = t;
+            }
+        }
+        // Look again after a load (a change of side means a level went in), now and then while
+        // nothing's found, and every two minutes anyway (copies a respawn may add).
+        bool due = rescan.exchange(false) || (whereChangedAt && t - whereChangedAt > 4000 && scannedAt < whereChangedAt) ||
+                   t - scannedAt > (found <= 0 ? 20000ull : 120000ull);
+        if (!due) continue;
+        U begin = GetTickCount64();
+        auto list = scan();
+        scannedAt = GetTickCount64();
+        logf("holo: scan took %llu ms, %zu copies", scannedAt - begin, list.size());
+        static bool probed = false;
+        if (!probed && !list.empty() && GetPrivateProfileIntW(L"holo", L"probe", 0, iniPath().c_str())) {   // [holo] probe=1
+            probed = true;
+            probe(list);
+        }
+        std::lock_guard<std::mutex> g(foundLock);
+        for (auto& b : list) fresh.push_back(std::move(b));
+    }
+}
+
+// The writer: keeps every copy at the colour wanted, ~120 times a second while a rainbow is on
+// (on a high-resolution timer: Sleep's steps are 16 ms), 10 times a second otherwise. Each copy is
+// read whole and written back only while everything but its colours is as first found (freed or
+// reused memory is dropped, never written); the three colours go back in one write.
+DWORD WINAPI watch(LPVOID) {
+    if (HANDLE t = CreateThread(nullptr, 0, scout, nullptr, 0, nullptr)) CloseHandle(t);
+    HANDLE timer = CreateWaitableTimerExW(nullptr, nullptr, 0x2 /* CREATE_WAITABLE_TIMER_HIGH_RESOLUTION */, TIMER_ALL_ACCESS);
+    if (!timer) timer = CreateWaitableTimerW(nullptr, FALSE, nullptr);
+    std::vector<Block> blocks;
+    std::vector<uint8_t> now(BLOCK);
+    bool cycling = false;
+    constexpr size_t FROM = COLOURS[0], TO = COLOURS[2] + 12;   // the span holding the three colours
+    for (;;) {
+        LARGE_INTEGER due;
+        due.QuadPart = cycling ? -80000LL : -1000000LL;   // 8 ms / 100 ms (100 ns units, relative)
+        if (timer && SetWaitableTimer(timer, &due, 0, nullptr, nullptr, FALSE)) WaitForSingleObject(timer, 200);
+        else Sleep(cycling ? 8 : 100);
+        {
+            std::lock_guard<std::mutex> g(foundLock);
+            for (auto& f : fresh) {
+                bool known = false;
+                for (auto& b : blocks) known |= b.base == f.base;
+                if (!known) blocks.push_back(std::move(f));
+            }
+            fresh.clear();
+        }
+        Setting set;
+        float hue;
+        {
+            std::lock_guard<std::mutex> g(lock);
+            set = settings[where];
+            hue = rainbowHue();
+        }
+        cycling = set.rainbow;
+        for (auto it = blocks.begin(); it != blocks.end();) {
+            bool same = readSelf(it->base, now.data(), BLOCK);
+            for (size_t i = 0; same && i < BLOCK; i++) same = masked(i) || now[i] == it->snap[i];
+            if (!same) { it = blocks.erase(it); continue; }
+            if (int look = liveLook; look >= 0) {
+                uint32_t head[2], g, f;
+                bool ours = readSelf(it->base - 0x190, head, 8) && (head[0] & 0xffff) == 1 &&
+                            ((head[0] >> 16) == 1 || (head[0] >> 16) == 0xc || (head[0] >> 16) == 0xe) && (head[1] | 2) == 0xba0e;
+                lookHeader(look, it->piece, g, f);
+                if (ours && (head[0] != g || head[1] != f)) {
+                    uint32_t want[2] = {g, f};
+                    SIZE_T wrote = 0;
+                    WriteProcessMemory(GetCurrentProcess(), reinterpret_cast<LPVOID>(it->base - 0x190), want, 8, &wrote);
+                    static int logged = 0;   // (if the game kept putting them back, this would repeat)
+                    if (logged++ < 40) logf("holo: arms live: piece %d %08x/%08x -> %08x/%08x", it->piece, head[0], head[1], g, f);
+                }
+            }
+            float want[3][3];
+            colours(*it, set, hue, want);
+            bool differs = false;
+            for (int c = 0; c < 3; c++)
+                if (memcmp(&now[COLOURS[c]], want[c], 12) != 0) { memcpy(&now[COLOURS[c]], want[c], 12); differs = true; }
+            if (differs) {
+                SIZE_T wrote = 0;
+                WriteProcessMemory(GetCurrentProcess(), reinterpret_cast<LPVOID>(it->base + FROM), &now[FROM], TO - FROM, &wrote);
+            }
+            ++it;
+        }
+        found = int(blocks.size());
+    }
+}
+}  // namespace holo
 
 // ---- hours today ----
 // Time Echo has been running today, added up across sessions in EchoLazyTablet.ini ([stats] day /
@@ -1768,7 +2299,7 @@ DWORD WINAPI playersWatch(LPVOID) {
 // sends the account's ID and display name from the saved profile (xplatformid, displayname)
 // and gets back blocked or not. The answer is kept in EchoLazyTablet.ini ([access] blocked) for
 // when the service can't be reached; with no answer ever, EchoLazyTablet stays on.
-constexpr const char* ECHOQUEUE_VERSION = "3.25";
+constexpr const char* ECHOQUEUE_VERSION = "3.26";
 constexpr const wchar_t* ACCESS_HOST = L"echoqueue.dokuyegar.workers.dev";  // the deployed Worker (server/worker.js)
 constexpr U ACCESS_EVERY_MS = 15 * 60 * 1000;
 
@@ -1953,6 +2484,11 @@ DWORD WINAPI matchWatch(LPVOID) {
                 if (v > 0 && v != lastThrow) { lastThrow = v; logf("last throw: %.1f m/s", v); }
             }
         }
+        static U sharedAt = 0;
+        if (now - sharedAt >= 5000 && remoteclip::hasTarget()) {
+            sharedAt = now;
+            if (apiSession(body) == 200 && jsonString(body, "match_type").rfind("Social", 0) != 0) remoteclip::shareMatch(jsonString(body, "sessionid"));
+        }
         if (counted || now - inGameSince > API_ASK_MS) continue;
         DWORD http = apiSession(body);
         if (!http) {  // also normal in the social lobby, so only worth a word if it never answered
@@ -1992,6 +2528,7 @@ struct Layout {
     unsigned rootSlot = 0;                                      // the root element showing the overlay
     std::vector<unsigned> navStockSelected, navOtherSelected;  // other tabs' highlights, hidden under PLAY
     std::vector<U> otherTabs;                                   // other mods' tab buttons (optional)
+    bool holo = false;                                          // the HOLO tab is installed (hologram chassis mod found)
 } layout;
 
 std::vector<U> readHexList(const wchar_t* key, const std::wstring& path) {
@@ -2037,6 +2574,7 @@ bool loadLayout() {
     }
     auto get = [&](const wchar_t* key) { return unsigned(GetPrivateProfileIntW(L"tablet", key, 0, path.c_str())); };
     layout.rootSlot = get(L"root_slot");
+    layout.holo = get(L"holo") != 0;
     layout.navStockSelected = readList(L"nav_stock_selected", path);
     layout.navOtherSelected = readList(L"nav_other_selected", path);
     layout.otherTabs = readHexList(L"other_tabs", path);
@@ -2059,7 +2597,7 @@ bool loadLayout() {
 
 struct View { void* p = nullptr; bool saved = false; float opacity = 1; };
 // Other: another mod's tab (Echo Arcade's) was pressed last; its own plugin draws that page.
-enum class Page { Stock, Queue, Sounds, Other };
+enum class Page { Stock, Queue, Sounds, Holo, Other };
 struct Context {
     Page page = Page::Stock;
     bool sawOther = false;      // another mod's page has been up (it may leave stock pages faded)
@@ -2083,6 +2621,11 @@ struct Context {
     bool naming = false;        // after an SFX button's key: typing its name on the same keyboard
     std::string name, keyCtrlText, keyShiftText, keyAltText;
     std::string soundStatus, soundEditText;
+    std::string holoStatus, holoHex;
+    std::vector<float> holoTints;   // the slider and preview colours last written
+    U holoHeld = 0, holoHeldAt = 0, holoRepeatAt = 0, holoActor = 0;   // a - / + being held (repeats): its control + 1
+    U holoTintedAt = 0;
+    void* gs = nullptr;         // the gamespace this context is for
     std::array<std::string, SOUND_PADS> soundText, soundCaption;
     std::string pickMessage;    // SAVE refused: says why for a moment
     U pickFirstUntil = 0;
@@ -2117,8 +2660,14 @@ int soundPad(U n) {
         if (QUEUE_SOUND_BUTTONS[i] == n) return int(i);
     return -1;
 }
-bool onOurPage(const Context& c) { return c.page == Page::Queue || c.page == Page::Sounds; }
+int holoButton(U n) {
+    for (unsigned i = 0; i < HOLO_CONTROL_COUNT; i++)
+        if (QUEUE_HOLO_BUTTONS[i] == n) return int(i);
+    return -1;
+}
+bool onOurPage(const Context& c) { return c.page == Page::Queue || c.page == Page::Sounds || c.page == Page::Holo; }
 bool isOurs(U n) {
+    if (n == QUEUE_HOLO_TAB || holoButton(n) >= 0) return true;
     if (keyFor(n) || n == QUEUE_CLIP_KEY || soundPad(n) >= 0 || n == QUEUE_SOUND_TAB || n == QUEUE_SOUND_EDIT) return true;
     return n == QUEUE_TAB || n == QUEUE_START || n == QUEUE_COMBAT || n == QUEUE_UPDATE || n == QUEUE_CANCEL || n == QUEUE_LOBBY || n == QUEUE_PRIVATE || n == QUEUE_STATS ||
            n == QUEUE_GFX_HIGH || n == QUEUE_GFX_LOW || n == QUEUE_CLIP || n == QUEUE_CLOCK || n == QUEUE_PLAY_CLOCK || n == QUEUE_CLOCK_12 || n == QUEUE_CLOCK_24;
@@ -2180,6 +2729,67 @@ bool readFile(const std::wstring& path, std::string& out) {
     bool ok = !ferror(f);
     fclose(f);
     return ok;
+}
+
+bool writeFile(const std::wstring& path, const std::string& data);
+
+// ARMS SOLID / SEE-THROUGH / HANDS ONLY. The game reads the hologram arms' draw flags only at
+// startup, so the installer (echo-modding-tool install_flat with _alt/ and _alt_hands/) puts every
+// version in the game data and keeps each manifest it patched each way, as <manifest>.holo-solid,
+// .holo-clear and .holo-hands (the live one and, with the GRAPHICS switch set up, both potato ones). Choosing copies those over them; the
+// live manifest takes the potato one it is a copy of, so GRAPHICS LOW / HIGH keep working.
+const wchar_t* const LOOK_SUFFIX[HOLO_LOOKS] = {L".holo-solid", L".holo-clear", L".holo-hands", L".holo-clear-hands"};
+const char* const LOOK_NAME[HOLO_LOOKS] = {"SOLID", "SEE-THROUGH", "SOLID HANDS", "CLEAR HANDS"};
+std::atomic<int> armsLoaded{-2};   // which one this start is using (-1 not set up; -2 not looked yet)
+std::atomic<int> armsChosen{-1};   // what was last chosen (for the next start)
+
+int armsLookOf(const std::wstring& m, const std::string& live) {
+    for (const wchar_t* file : {L"", L".potato-high", L".potato-low"})
+        for (int k = 0; k < int(HOLO_LOOKS); k++) {
+            std::string data;
+            if (readFile(m + file + LOOK_SUFFIX[k], data) && data == live) return k;
+        }
+    return -1;
+}
+
+int armsLookShown() {
+    if (armsLoaded == -2) {   // once, the first time the page is drawn (the game read the manifest long before)
+        std::wstring m = manifestPath();
+        std::string live;
+        armsLoaded = readFile(m, live) ? armsLookOf(m, live) : -1;
+        logf("holo: arms this start: %s", armsLoaded >= 0 ? LOOK_NAME[armsLoaded] : "unknown (installed without the looks)");
+    }
+    return armsChosen >= 0 ? armsChosen.load() : armsLoaded.load();
+}
+
+std::string switchArmsLook(int look) {
+    const char* name = LOOK_NAME[look];
+    std::wstring m = manifestPath();
+    std::string live, wanted;
+    if (!readFile(m, live) || !readFile(m + LOOK_SUFFIX[look], wanted)) {
+        logf("holo: arms: no %ls manifest (installed without that look)", LOOK_SUFFIX[look]);
+        return "REINSTALL THE HOLOGRAM ARMS FIRST";
+    }
+    armsLookShown();
+    std::string next = wanted;   // the live manifest's next contents: its own, or its potato one's
+    for (const wchar_t* potato : {L".potato-high", L".potato-low"}) {
+        std::string now, want;
+        if (!readFile(m + potato, now) || !readFile(m + potato + LOOK_SUFFIX[look], want)) continue;
+        if (now == live) next = want;
+        if (now != want && !writeFile(m + potato, want)) {
+            logf("holo: arms: couldn't write %ls (error %lu)", potato, GetLastError());
+            return "COULDN'T SWITCH - SEE ECHOLAZYTABLET.LOG";
+        }
+    }
+    if (next != live && !writeFile(m, next)) {
+        logf("holo: arms: couldn't write the manifest (error %lu)", GetLastError());
+        return "COULDN'T SWITCH - SEE ECHOLAZYTABLET.LOG";
+    }
+    armsChosen = look;
+    holo::liveLook = look;
+    WritePrivateProfileStringW(L"holo", L"arms", LOOK_SUFFIX[look] + 6, iniPath().c_str());
+    logf("holo: arms: %s chosen for the next start", name);
+    return std::string(name) + (look == armsLoaded ? " - ON" : " - ON NOW IF IT CAN, OR AFTER A RESTART");
 }
 
 bool writeFile(const std::wstring& path, const std::string& data) {
@@ -2497,6 +3107,153 @@ void pressKeys(const std::string& spec) {
     else delete copy;
 }
 
+// ---- CLIP on a second PC ----
+// One tap on the tablet saves a clip here and on a PC spectating this one: [clip] send_to on this
+// PC (the other PC's IP address, or "all" for every PC on the network) sends a small UDP message,
+// and [clip] listen=1 on the other PC presses that PC's own [clip] keys when it arrives. Sent three
+// times in case Wi-Fi drops one; each tap has its own number, so it only presses once.
+// The same link takes a spectator PC along: in a match, send_to also gets the match's id every 5
+// seconds, and an Echo started with -spectatorstream and listen=1 restarts itself into that match.
+namespace remoteclip {
+constexpr unsigned short PORT = 6733;
+constexpr char MESSAGE[] = "EchoLazyTablet CLIP ";
+constexpr char MATCH[] = "EchoLazyTablet JOIN ";
+
+bool startNetwork() {
+    static bool ok = [] { WSADATA data; return WSAStartup(MAKEWORD(2, 2), &data) == 0; }();
+    return ok;
+}
+
+std::wstring sendTo() {
+    wchar_t buffer[64];
+    GetPrivateProfileStringW(L"clip", L"send_to", L"", buffer, 64, iniPath().c_str());
+    return buffer;
+}
+
+// -> how many of `times` went out, or -1 if `target` isn't an address or there's no network.
+int sendMessage(const std::wstring& target, const std::string& message, int times) {
+    sockaddr_in to{};
+    to.sin_family = AF_INET;
+    to.sin_port = htons(PORT);
+    bool all = target == L"all";
+    if (all) to.sin_addr.s_addr = INADDR_BROADCAST;
+    else if (InetPtonW(AF_INET, target.c_str(), &to.sin_addr) != 1) return -1;
+    SOCKET s = startNetwork() ? socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP) : INVALID_SOCKET;
+    if (s == INVALID_SOCKET) return -1;
+    BOOL on = TRUE;
+    if (all) setsockopt(s, SOL_SOCKET, SO_BROADCAST, reinterpret_cast<const char*>(&on), sizeof on);
+    int sent = 0;
+    for (int i = 0; i < times; i++) {
+        if (i) Sleep(40);
+        if (sendto(s, message.data(), int(message.size()), 0, reinterpret_cast<sockaddr*>(&to), sizeof to) == int(message.size())) sent++;
+    }
+    closesocket(s);
+    return sent;
+}
+
+DWORD WINAPI sendThread(LPVOID) {
+    std::wstring target = sendTo();
+    int sent = sendMessage(target, MESSAGE + std::to_string(GetTickCount64()), 3);
+    if (sent < 0) logf("clip: can't send to [clip] send_to=%ls (not an IP address, or no network)", target.c_str());
+    else logf("clip: sent to %ls (%d of 3)", target.c_str(), sent);
+    return 0;
+}
+
+bool hasTarget() { return !sendTo().empty(); }
+
+void shareMatch(const std::string& id) {
+    if (id.empty()) return;
+    static std::string shared;
+    if (id != shared) { shared = id; logf("clip: telling the other PC about match %s", id.c_str()); }
+    sendMessage(sendTo(), MATCH + id, 1);
+}
+
+// -> true if there's another PC to send to.
+bool send() {
+    if (sendTo().empty()) return false;
+    if (HANDLE t = CreateThread(nullptr, 0, sendThread, nullptr, 0, nullptr)) CloseHandle(t);
+    return true;
+}
+
+bool isMatchId(const std::string& id) {
+    if (id.size() != 36) return false;
+    for (size_t i = 0; i < 36; i++) {
+        bool dash = i == 8 || i == 13 || i == 18 || i == 23;
+        if (dash ? id[i] != '-' : !isxdigit(static_cast<unsigned char>(id[i]))) return false;
+    }
+    return true;
+}
+
+// Only an Echo started as a spectator moves, so a headset session on this PC is never pulled away.
+void follow(const std::string& id) {
+    constexpr wchar_t FLAG[] = L" -lobbyid ";
+    constexpr size_t FLAG_LENGTH = 10, ID_LENGTH = 36;
+    std::wstring line = GetCommandLineW();
+    if (line.find(L"-spectatorstream") == std::wstring::npos || !isMatchId(id)) return;
+    std::wstring wide(id.begin(), id.end());
+    size_t at = line.find(FLAG);
+    if (at != std::wstring::npos) {
+        if (_wcsnicmp(line.c_str() + at + FLAG_LENGTH, wide.c_str(), ID_LENGTH) == 0) return;
+        line.erase(at, FLAG_LENGTH + ID_LENGTH);
+    }
+    line += FLAG + wide;
+    wchar_t exe[MAX_PATH];
+    GetModuleFileNameW(nullptr, exe, MAX_PATH);
+    STARTUPINFOW startup{};
+    startup.cb = sizeof startup;
+    PROCESS_INFORMATION process{};
+    logf("clip: restarting to spectate match %s", id.c_str());
+    if (!CreateProcessW(exe, line.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr, &startup, &process)) {
+        logf("clip: couldn't restart Echo (error %lu)", GetLastError());
+        return;
+    }
+    CloseHandle(process.hThread);
+    CloseHandle(process.hProcess);
+    TerminateProcess(GetCurrentProcess(), 0);
+}
+
+DWORD WINAPI listenThread(LPVOID) {
+    SOCKET s = startNetwork() ? socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP) : INVALID_SOCKET;
+    sockaddr_in here{};
+    here.sin_family = AF_INET;
+    here.sin_port = htons(PORT);
+    here.sin_addr.s_addr = INADDR_ANY;
+    bool bound = false;
+    for (int i = 0; s != INVALID_SOCKET && i < 6 && !bound; i++) {  // the Echo this one replaced may still be closing
+        if (i) Sleep(500);
+        bound = bind(s, reinterpret_cast<sockaddr*>(&here), sizeof here) == 0;
+    }
+    if (!bound) {
+        logf("clip: can't listen on port %u (error %d)", PORT, WSAGetLastError());
+        return 0;
+    }
+    logf("clip: listening for the other PC on port %u", PORT);
+    std::string last;
+    for (;;) {
+        char buffer[64];
+        int n = recv(s, buffer, sizeof buffer, 0);
+        if (n == SOCKET_ERROR && WSAGetLastError() == WSAEMSGSIZE) continue;  // someone else's, too long for us
+        if (n == SOCKET_ERROR) { logf("clip: listening stopped (error %d)", WSAGetLastError()); break; }
+        std::string message(buffer, n);
+        if (message.rfind(MATCH, 0) == 0) { follow(message.substr(sizeof MATCH - 1)); continue; }
+        if (message.rfind(MESSAGE, 0) != 0 || message == last) continue;
+        last = message;
+        std::string spec = clipKeysSpec();
+        Keys keys;
+        if (!parseKeys(spec, keys)) { logf("clip: from the other PC, but [clip] keys isn't set here"); continue; }
+        logf("clip: from the other PC, pressing %s", keys.text.c_str());
+        pressKeys(spec);
+    }
+    closesocket(s);
+    return 0;
+}
+
+void start() {
+    if (!GetPrivateProfileIntW(L"clip", L"listen", 0, iniPath().c_str())) return;
+    if (HANDLE t = CreateThread(nullptr, 0, listenThread, nullptr, 0, nullptr)) CloseHandle(t);
+}
+}  // namespace remoteclip
+
 std::string elapsed(U ms) {
     char b[16];
     snprintf(b, sizeof b, "%llu:%02llu", ms / 60000, ms / 1000 % 60);
@@ -2533,7 +3290,7 @@ void ensure(void* canvas, unsigned element, bool visible) {
 
 void render(Context& c) {
     bool active = onOurPage(c) && !tabletFault;
-    bool play = active && c.page == Page::Queue, sounds = active && c.page == Page::Sounds;
+    bool play = active && c.page == Page::Queue, sounds = active && c.page == Page::Sounds, holoPage = active && c.page == Page::Holo;
     U now = GetTickCount64();
     bool changed = c.applied != int(active);
     c.applied = int(active);
@@ -2569,19 +3326,20 @@ void render(Context& c) {
             ensure(overlay, i, play && !c.setup);
         ensure(overlay, QUEUE_PAGE_PAGE, play && !c.setup);
         ensure(overlay, QUEUE_PAGE_SOUND_PAGE, sounds && !c.setup);
+        ensure(overlay, QUEUE_PAGE_HOLO_PAGE, holoPage && !c.setup);
         ensure(overlay, QUEUE_PAGE_KEYBOARD, active && c.setup);
         for (unsigned i : {QUEUE_PAGE_CLOCK, QUEUE_PAGE_CLOCK_FORMAT, QUEUE_PAGE_CLOCK_FORMAT_TEXT})  // (the hotkey needs the room)
             ensure(overlay, i, sounds && !c.setup);
     }
     if (overlay && active) {   // the title strip: PLAY or SFX, or what's being set and the hotkey picked so far
-        std::string sub = sounds ? "SOUNDBOARD" : "MATCHMAKING";
+        std::string sub = sounds ? "SOUNDBOARD" : holoPage ? "HOLOGRAM ARM COLOURS" : "MATCHMAKING";
         if (c.setup && now < c.pickFirstUntil) sub = c.pickMessage;
         else if (c.setup && c.naming) sub = c.name.empty() ? "TYPE A NAME, THEN SAVE" : "NAME: " + c.name;
         else if (c.setup && !c.ctrl && !c.shift && !c.alt && c.key.empty()) sub = c.setupSlot < 0 ? "PICK YOUR CLIP APP'S HOTKEY" : "PICK YOUR SOUND'S HOTKEY";
         else if (c.setup)
             sub = "HOTKEY: " + std::string(c.ctrl ? "CTRL + " : "") + (c.shift ? "SHIFT + " : "") + (c.alt ? "ALT + " : "") +
                   (c.key.empty() ? "..." : c.key);
-        std::string heading = !c.setup ? (sounds ? "SFX" : "PLAY") : c.setupSlot < 0 ? "CLIP" : "SFX " + std::to_string(c.setupSlot + 1);
+        std::string heading = !c.setup ? (sounds ? "SFX" : holoPage ? "HOLO" : "PLAY") : c.setupSlot < 0 ? "CLIP" : "SFX " + std::to_string(c.setupSlot + 1);
         setText(overlay, QUEUE_PAGE_TITLE, c.titleText, heading);
         setText(overlay, QUEUE_PAGE_SUBTITLE, c.subtitleText, sub);
         if (c.setup) {   // while naming, the bottom row's keys type instead
@@ -2625,13 +3383,15 @@ void render(Context& c) {
     // Tab highlight: ours while our page is up, otherwise the stock ones (which the game's
     // own scripts keep pointing at the right stock tab). While ours is up, the game may
     // re-show its highlight; re-checked a few times a second, not every frame.
-    int nav = play ? 1 : sounds ? 2 : 0;
+    int nav = play ? 1 : sounds ? 2 : holoPage ? 3 : 0;
     if (overlay && c.views[1].p && (c.navState != nav || (active && now - c.navCheckedAt > 250))) {
         c.navCheckedAt = now;
         ensure(overlay, QUEUE_PAGE_TAB_SELECTED, nav == 1);
         ensure(overlay, QUEUE_PAGE_TAB_ICON, nav != 1);
         ensure(overlay, QUEUE_PAGE_SOUND_TAB_SELECTED, nav == 2);
         ensure(overlay, QUEUE_PAGE_SOUND_TAB_ICON, nav != 2);
+        ensure(overlay, QUEUE_PAGE_HOLO_TAB_SELECTED, layout.holo && nav == 3);
+        ensure(overlay, QUEUE_PAGE_HOLO_TAB_ICON, layout.holo && nav != 3);
         if (active) {
             for (auto i : layout.navStockSelected) ensure(c.views[1].p, i, false);
             for (auto i : layout.navOtherSelected) ensure(c.views[1].p, i, false);  // their own plugin shows them again
@@ -2646,6 +3406,49 @@ void render(Context& c) {
         for (unsigned i = 0; i < SOUND_PADS; i++) {
             setText(page, QUEUE_SOUND_TEXTS[i], c.soundText[i], soundLabels[i]);
             setText(page, QUEUE_SOUND_CAPTIONS[i], c.soundCaption[i], soundNames[i]);
+        }
+    }
+    if (holoPage && page && !c.setup) {
+        int where = holo::where, found = holo::found;
+        std::string status = now < c.flashUntil ? c.flash
+                           : found < 0 ? "LOOKING FOR THE HOLOGRAM ARMS..."
+                           : found == 0 ? "HOLOGRAM ARMS NOT FOUND YET"
+                           : std::string("IN USE NOW: ") + HOLO_BAR_LABELS[where];
+        setText(page, QUEUE_PAGE_HOLO_STATUS, c.holoStatus, status);
+        // - / + held: one more step after 0.4 s, then 16 a second (until it's let go, or 8 s)
+        if (c.holoHeld && held.count({reinterpret_cast<U>(c.gs), c.holoActor, QUEUE_HOLO_BUTTONS[c.holoHeld - 1]}) &&
+            now - c.holoHeldAt > 400 && now - c.holoHeldAt < 8000 && now - c.holoRepeatAt >= 60) {
+            holo::press(unsigned(c.holoHeld - 1));
+            c.holoRepeatAt = now;
+        }
+        static holo::View v;
+        holo::view(v);
+        for (unsigned i = 0; i < HOLO_CONTROL_COUNT; i++) ensure(page, QUEUE_HOLO_FRAMES[i], v.lit[i]);
+        setText(page, QUEUE_PAGE_HOLO_HEX, c.holoHex, v.hex);
+        // The preview in the colour picked and the fine-tune buttons in theirs: written into the
+        // elements' colours (+0x78), then the preview hidden and shown again so the tablet redraws.
+        std::vector<float> tints(v.colour, v.colour + 3);
+        for (unsigned i = 0; i < 2 * HOLO_FINE; i++) {
+            tints.insert(tints.end(), v.fine[i], v.fine[i] + 3);
+            tints.insert(tints.end(), v.fineText[i], v.fineText[i] + 3);
+        }
+        bool moved = tints.size() != c.holoTints.size();
+        for (size_t i = 0; !moved && i < tints.size(); i++) moved = std::fabs(tints[i] - c.holoTints[i]) > 0.004f;
+        if (moved && now - c.holoTintedAt >= 50) {   // (the rainbow's preview: 20 redraws a second at most)
+            P rows = at<P>(page, 0x90);
+            auto tint = [&](unsigned element, const float* rgb) {
+                float* to = reinterpret_cast<float*>(rows + element * 224 + 0x78);
+                to[0] = rgb[0], to[1] = rgb[1], to[2] = rgb[2], to[3] = 1;
+            };
+            tint(QUEUE_PAGE_HOLO_PREVIEW, v.colour);
+            for (unsigned i = 0; i < 2 * HOLO_FINE; i++) {
+                tint(QUEUE_HOLO_FINE_FILLS[i], v.fine[i]);
+                tint(QUEUE_HOLO_FINE_TEXTS[i], v.fineText[i]);
+            }
+            show(page, QUEUE_PAGE_HOLO_PREVIEW, false);
+            show(page, QUEUE_PAGE_HOLO_PREVIEW, true);
+            c.holoTints = tints;
+            c.holoTintedAt = now;
         }
     }
     if (play && page) {
@@ -2739,7 +3542,7 @@ void gate(Context& c, void* cs) {
     unsigned n = at<unsigned short>(cs, 0x10a);
     bool ready = c.views[0].p && c.views[1].p && c.views[2].p;
     U key = U(c.page == Page::Queue) | U(matchmaking(c.state)) << 1 | U(ready) << 2 | U(tabletFault.load()) << 3 | U(c.setup) << 4 |
-            U(c.page == Page::Sounds) << 5 | U(n) << 8 | count << 24;
+            U(c.page == Page::Sounds) << 5 | U(c.page == Page::Holo) << 6 | U(n) << 8 | count << 24;
     if (key == c.gateKey) return;
     c.gateKey = key;
     if (count > 8192 || n > count) { failTablet("unexpected native button pool layout"); return; }
@@ -2763,12 +3566,14 @@ void gate(Context& c, void* cs) {
         bool hide;
         if (tabletFault) hide = isOurs(b.name);                 // stock buttons back to normal
         else if (b.name == QUEUE_TAB || b.name == QUEUE_SOUND_TAB) hide = !ready;
+        else if (b.name == QUEUE_HOLO_TAB) hide = !ready || !layout.holo;
         else if (keyFor(b.name)) hide = !onOurPage(c) || !c.setup;
         else if (c.setup && onOurPage(c)) hide = true;   // the page's own buttons, under the setup page
         else if (b.name == QUEUE_CLOCK) hide = c.page != Page::Sounds;
         else if (b.name == QUEUE_PLAY_CLOCK || b.name == QUEUE_CLOCK_12 || b.name == QUEUE_CLOCK_24) hide = c.page != Page::Queue;
         else if (b.name == QUEUE_UPDATE) hide = c.page != Page::Queue || updateAvailable().empty();
         else if (soundPad(b.name) >= 0 || b.name == QUEUE_SOUND_EDIT) hide = c.page != Page::Sounds;
+        else if (holoButton(b.name) >= 0) hide = c.page != Page::Holo;
         else if (b.name == QUEUE_START || b.name == QUEUE_COMBAT) hide = c.page != Page::Queue || matchmaking(c.state);
         else if (b.name == QUEUE_CANCEL) hide = c.page != Page::Queue || !matchmaking(c.state);
         else if (b.name == QUEUE_LOBBY) hide = c.page != Page::Queue || matchmaking(c.state);
@@ -2918,6 +3723,7 @@ void unload(void* p, U a, U b, U c) {
                 ctx.soundStatus.clear(), ctx.soundEditText.clear();
                 for (auto& t : ctx.soundText) t.clear();
                 for (auto& t : ctx.soundCaption) t.clear();
+                ctx.holoStatus.clear(), ctx.holoHex.clear(), ctx.holoTints.clear();
                 ctx.modsShown = -1;
                 ctx.searchShown = -1;
                 ctx.gfxShown = -2;
@@ -2992,7 +3798,8 @@ void onEvent(void* gs, U event, U actor, U component, int arg) {
     // MATCH started a search and CANCEL SEARCH, in its place, stopped it 80 ms later) or its
     // neighbour (LOW 1.3 s after HIGH): another of the page's buttons within a second is ignored.
     // The keyboard's keys and the SFX buttons are tapped in quick succession, so they're left out.
-    if (isOurs(component) && component != QUEUE_TAB && component != QUEUE_SOUND_TAB && !keyFor(component) && soundPad(component) < 0) {
+    if (isOurs(component) && component != QUEUE_TAB && component != QUEUE_SOUND_TAB && component != QUEUE_HOLO_TAB && !keyFor(component) &&
+        soundPad(component) < 0 && holoButton(component) < 0) {
         static U lastAt = 0, lastButton = 0;
         U now = GetTickCount64();
         if (component != lastButton && now - lastAt < 1000) {
@@ -3026,6 +3833,19 @@ void onEvent(void* gs, U event, U actor, U component, int arg) {
         if (c.setup && c.setupSlot < 0) closeKeySetup(c);    // it was picking CLIP's key
         if (c.page == Page::Other) kick = Kick{gs, actor, c.stockTab, arg};
         c.page = Page::Sounds;
+    } else if (component == QUEUE_HOLO_TAB && layout.holo) {
+        if (c.page != Page::Holo) { logf("tablet: HOLO page selected"); playSound(SOUND_CLICK); }
+        if (c.setup) closeKeySetup(c);
+        if (c.page == Page::Other) kick = Kick{gs, actor, c.stockTab, arg};
+        c.page = Page::Holo;
+        holo::rescan = holo::found <= 0;
+    } else if (int hb = c.page == Page::Holo && !c.setup ? holoButton(component) : -1; hb >= 0) {
+        playSound(SOUND_CLICK);
+        std::string what = holo::press(unsigned(hb));
+        if (!what.empty()) { c.flash = what; c.flashUntil = GetTickCount64() + 2000; }
+        bool stepper = unsigned(hb) >= HOLO_FINE_FIRST && unsigned(hb) < HOLO_FINE_FIRST + 2 * HOLO_FINE;
+        if (stepper) c.holoHeld = U(hb) + 1, c.holoHeldAt = c.holoRepeatAt = GetTickCount64(), c.holoActor = actor, c.gs = gs;
+        else c.holoHeld = 0;
     } else if (component == QUEUE_SOUND_EDIT && c.page == Page::Sounds && !c.setup) {
         playSound(SOUND_CLICK);
         c.editing = !c.editing;
@@ -3147,14 +3967,15 @@ void onEvent(void* gs, U event, U actor, U component, int arg) {
         openKeySetup(c, -1);
     } else if (component == QUEUE_CLIP && c.page == Page::Queue && clipKeysSpec() == "none") {
         playSound(SOUND_CLICK);
-        c.flash = "NO CLIP APP - TAP KEY TO PICK ONE";
+        c.flash = remoteclip::send() ? "CLIP - SENT TO THE OTHER PC" : "NO CLIP APP - TAP KEY TO PICK ONE";
         c.flashUntil = GetTickCount64() + 3000;
     } else if (component == QUEUE_CLIP && c.page == Page::Queue) {
         logf("tablet: CLIP pressed");
         playSound(SOUND_CLICK);
         Keys keys;
         std::string spec = clipKeysSpec();
-        c.flash = parseKeys(spec, keys) ? "CLIP - PRESSED " + keys.text : "CLIP KEYS NOT SET - SEE ECHOLAZYTABLET.INI";
+        bool valid = parseKeys(spec, keys);
+        c.flash = !valid ? "CLIP KEYS NOT SET - SEE ECHOLAZYTABLET.INI" : remoteclip::send() ? "CLIP - " + keys.text + " ON BOTH PCS" : "CLIP - PRESSED " + keys.text;
         c.flashUntil = GetTickCount64() + 3000;
         pressKeys(spec);
     } else if ((component == QUEUE_GFX_HIGH || component == QUEUE_GFX_LOW) && c.page == Page::Queue) {
@@ -3462,6 +4283,7 @@ void initialize() {
     if (liveTextures()) texlod::loadAll();
     if (!verifyExecutable()) { fault = tabletFault = true; logf("EchoLazyTablet disabled"); return; }
     loadSettings();
+    remoteclip::start();
     loadToday();
     voiceJoiningMatch = uint32_t(readHex(L"sounds", L"joining_match", 0));
     if (!voiceJoiningMatch) logf("settings: \"Joining Match\" not learnt yet (find one match from the menu or a terminal)");
@@ -3477,6 +4299,10 @@ void initialize() {
     installTablet();
     attachWindow();
     if (HANDLE t = CreateThread(nullptr, 0, matchWatch, nullptr, 0, nullptr)) CloseHandle(t);
+    if (layout.holo) {
+        holo::load();
+        if (HANDLE t = CreateThread(nullptr, 0, holo::watch, nullptr, 0, nullptr)) CloseHandle(t);
+    }
     if (HANDLE t = CreateThread(nullptr, 0, playersWatch, nullptr, 0, nullptr)) CloseHandle(t);
     if (HANDLE t = CreateThread(nullptr, 0, accessWatch, nullptr, 0, nullptr)) CloseHandle(t);
     if (HANDLE t = CreateThread(nullptr, 0, updateWatch, nullptr, 0, nullptr)) CloseHandle(t);

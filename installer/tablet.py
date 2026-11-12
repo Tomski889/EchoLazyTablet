@@ -64,6 +64,50 @@ def sound_button(i):
     return sym(f'echo_queue_sound_{i}_button_v1')
 
 
+# The HOLO tab (only with the hologram chassis mod installed): the hologram arms' colour for blue
+# team, orange team and the lobby, picked like in a paint app (12 Nov layout). Left: which one is
+# being edited, a round preview with its hex code, HOLOGRAM BLUE (back to the hologram's own).
+# Middle: a smooth colour field (hue across, light to dark down) and a white-to-black bar, both
+# tapped through an invisible grid of touch areas (a ring marks the pick); under them word buttons
+# to fine-tune it (< COLOUR / COLOUR >, DARKER / LIGHTER, PALER / BOLDER: one step a tap, hold to
+# keep going), each filled with the colour it leads to (the plugin tints them). Right: RAINBOW (the whole arms cycle
+# round the colour wheel) and its speed, and ARMS SOLID / SEE-THROUGH / HANDS ONLY (next start).
+HOLO_TAB_BUTTON = sym('echo_queue_holo_tab_button_v1')
+HOLO_BARS = ('blue', 'orange', 'lobby')
+HOLO_BAR_LABELS = ('BLUE TEAM', 'ORANGE TEAM', 'LOBBY')
+HOLO_SPEEDS = 5
+HOLO_LOOKS = ('solid', 'clear', 'hands', 'clear_hands')   # ARMS: SOLID / SEE-THROUGH / SOLID HANDS / CLEAR HANDS
+HOLO_FINE = ('hue', 'light', 'sat')                 # the fine-tune pairs: COLOUR, BRIGHTNESS, VIVIDNESS
+HOLO_FIELD_COLS, HOLO_FIELD_ROWS, HOLO_GREYS = 20, 9, 12
+HOLO_FIELD_TOP, HOLO_FIELD_SPAN = .92, .84          # the field's lightness: top edge, top to bottom
+# Every control, in the order the plugin's arrays use (each has a touch area and a highlight).
+HOLO_CONTROLS = ([f'edit_{b}' for b in HOLO_BARS] + ['reset', 'rainbow'] + [f'speed_{i}' for i in range(HOLO_SPEEDS)]
+                 + [f'look_{k}' for k in HOLO_LOOKS] + [f'{k}_{x}' for k in HOLO_FINE for x in ('minus', 'plus')]
+                 + [f'field_{r}_{c}' for r in range(HOLO_FIELD_ROWS) for c in range(HOLO_FIELD_COLS)]
+                 + [f'grey_{i}' for i in range(HOLO_GREYS)])
+
+
+def holo_field_rgb(u, v):
+    """The colour field at (u, v) in 0-1 (also what the plugin picks for a tap: the touch area's centre)."""
+    import colorsys
+    return colorsys.hls_to_rgb(u % 1, HOLO_FIELD_TOP - HOLO_FIELD_SPAN * v, 1)
+
+
+def holo_grey(u):
+    """The white-to-black bar at u in 0-1: each touch area's centre is exactly one of its HOLO_GREYS greys."""
+    n = HOLO_GREYS
+    return 1 - min(1, max(0, (u * n - .5) / (n - 1)))
+
+
+# The hologram chassis mod's wire material (echo-modding-tool holo_whole.rs): its being in the
+# game is what puts the HOLO tab in (ECHOQUEUE_HOLO=1 forces it, =0 leaves it out).
+HOLO_MATERIAL = (0xe3e0266f1911dafa, 0x5182867f02da1080)
+
+
+def holo_button(key):
+    return sym(f'echo_queue_holo_{key}_button_v1')
+
+
 # The CLIP HOTKEY page's keyboard: (label, what the plugin does with it). Its touch areas are
 # echo_queue_key_<label>_v1.
 KEYBOARD_ROWS = (['F1', 'F2', 'F3', 'F4', 'F5', 'F6', 'F7', 'F8', 'F9', 'F10', 'F11', 'F12'],
@@ -100,6 +144,9 @@ KEYBOARD = (4, 106, 1020, 658)                   # the CLIP HOTKEY keyboard: the
 SOUND_EDIT = (760, 20, 960, 98)                  # the SFX page's EDIT / DONE
 SOUND_PAD_W, SOUND_PAD_H, SOUND_PAD_GAP = 224, 186, 14
 SOUND_PAD_ORIGIN = (30, 110)                     # the SFX page's top left button
+HOLO_FIELD = (252, 22, 772, 330)                 # the colour field (page pixels)
+HOLO_GREY_BAR = (252, 340, 772, 370)             # the white-to-black bar under it
+HOLO_BTN, HOLO_LIT, HOLO_EDGE = (.16, .18, .22, 1), (.05, .46, .45, 1), (.2, .82, .78, 1)
 OVERLAY_H = 768                                  # (nothing past the tablet's edge is drawn: tried, 25 Oct)
 
 ATLAS = 0x79563b60c7895d4e                # the tablet UI atlas, 2048 x 3424 BC7
@@ -123,7 +170,7 @@ TAB_IDLE_UV = (0.6904, 0.3645, 0.7393, 0.3937)
 TAB_SELECTED_UV = (0.6899, 0.3297, 0.7393, 0.3595)
 BGRA_TEMPLATE = 0x84b9a06506af66fe        # stock 128x128 B8G8R8A8 texture (header template)
 DXGI_B8G8R8A8_UNORM, DXGI_B8G8R8A8_UNORM_SRGB = 87, 91
-ICON_W, ICON_H = 512, 512
+ICON_W, ICON_H = 512, 1024
 
 TEAL = (.05, .55, .54, 1)
 TEXT, WHITE, BLACK = (.78, .78, .78, 1), (1, 1, 1, 1), (0, 0, 0, 1)
@@ -201,10 +248,48 @@ def screen_uv(rect):
     return (u0 + x0 / 1024 * (u1 - u0), v0 + y0 / 768 * (v1 - v0), u0 + x1 / 1024 * (u1 - u0), v0 + y1 / 768 * (v1 - v0))
 
 
+def holo_texture(tex, uvs):
+    from PIL import Image, ImageDraw
+    import colorsys
+
+    def place(key, im, x, y):
+        tex.alpha_composite(im, (x, y))
+        uvs[key] = (x / ICON_W, y / ICON_H, (x + im.width) / ICON_W, (y + im.height) / ICON_H)
+
+    def rounded(im, radius):
+        big = Image.new('L', (im.width * 4, im.height * 4), 0)
+        ImageDraw.Draw(big).rounded_rectangle((0, 0, big.width - 1, big.height - 1), radius=radius * 4, fill=255)
+        im.putalpha(big.resize(im.size, Image.LANCZOS))
+        return im
+
+    def picture(w, h, fn):
+        im = Image.new('RGB', (w, h))
+        im.putdata([tuple(round(255 * c) for c in fn(x / (w - 1), y / max(1, h - 1))) for y in range(h) for x in range(w)])
+        return im.convert('RGBA')
+
+    def shape(w, h, radius):
+        return rounded(Image.new('RGBA', (w, h), (255, 255, 255, 255)), radius)
+
+    place('holo_field', rounded(picture(512, 272, holo_field_rgb), 14), 0, 512)
+    place('holo_grey', rounded(picture(512, 30, lambda u, v: (holo_grey(u),) * 3), 15), 0, 792)
+    place('holo_rainbow', rounded(picture(256, 12, lambda u, v: colorsys.hsv_to_rgb(u, 1, 1)), 6), 0, 830)
+    place('holo_pill', shape(208, 46, 23), 0, 850)
+    place('holo_pill_short', shape(184, 46, 23), 216, 850)
+    place('holo_box', shape(184, 96, 20), 0, 904)
+    ring = Image.new('RGBA', (256, 256), (0, 0, 0, 0))   # white ring, thin dark edge each side
+    d = ImageDraw.Draw(ring)
+    d.ellipse((8, 8, 248, 248), fill=(20, 20, 20, 230))
+    d.ellipse((16, 16, 240, 240), fill=(255, 255, 255, 255))
+    d.ellipse((64, 64, 192, 192), fill=(20, 20, 20, 230))
+    d.ellipse((72, 72, 184, 184), fill=(0, 0, 0, 0))
+    place('holo_ring', ring.resize((64, 64), Image.LANCZOS), 192, 904)
+    place('holo_tile', shape(82, 48, 14), 264, 904)
+
+
 def icon_texture(atlas):
     """ICON_W x ICON_H: the PLAY and SFX tabs (idle, selected) and the disc and house glyphs. -> (BGRA bytes, uvs)."""
     from PIL import Image
-    from disc_icon import chart, disc, house, lock, monitor, potato, speaker, speed
+    from disc_icon import chart, disc, house, lock, monitor, palette, potato, speaker, speed
     tex = Image.new('RGBA', (ICON_W, ICON_H), (0, 0, 0, 0))
     uvs = {}
     for col, (key, uv, glyph) in enumerate((('tab_idle', TAB_IDLE_UV, disc), ('tab_selected', TAB_SELECTED_UV, disc),
@@ -219,6 +304,14 @@ def icon_texture(atlas):
     uvs['disc'] = (4 / ICON_W, 132 / ICON_H, 124 / ICON_W, 252 / ICON_H)
     tex.alpha_composite(house(120), (132, 132))
     uvs['house'] = (132 / ICON_W, 132 / ICON_H, 252 / ICON_W, 252 / ICON_H)
+    for col, (key, uv) in enumerate((('holo_idle', TAB_IDLE_UV), ('holo_selected', TAB_SELECTED_UV))):   # the HOLO tab
+        frame = tab_frame(atlas, uv)
+        w, h = frame.size
+        g = palette(round(h * .66))
+        frame.alpha_composite(g, ((w - g.width) // 2, (h - g.height) // 2))
+        x = 260 + col * 124
+        tex.paste(frame, (x, 132))
+        uvs[key] = (x / ICON_W, 132 / ICON_H, (x + w) / ICON_W, (132 + h) / ICON_H)
     for col, (key, glyph) in enumerate((('lock', lock), ('chart', chart), ('speed', speed), ('monitor', monitor))):
         tex.alpha_composite(glyph(120), (col * 128 + 4, 260))
         uvs[key] = ((col * 128 + 4) / ICON_W, 260 / ICON_H, (col * 128 + 124) / ICON_W, 380 / ICON_H)
@@ -235,6 +328,9 @@ def icon_texture(atlas):
     tex.alpha_composite(pill.resize((bw, bh), Image.LANCZOS), (260, 388))
     uvs['pill'] = (260 / ICON_W, 388 / ICON_H, (260 + bw) / ICON_W, (388 + bh) / ICON_H)
     uvs['potato'] = (4 / ICON_W, 388 / ICON_H, 124 / ICON_W, 508 / ICON_H)
+    # The HOLO page (12 Nov): its colour field, white-to-black bar and rainbow strip (each with
+    # rounded ends), and white shapes the page tints: pills, the RAINBOW box and the pick's ring.
+    holo_texture(tex, uvs)
     r, g, b, a = tex.split()
     return Image.merge('RGBA', (b, g, r, a)).tobytes(), uvs
 
@@ -320,8 +416,15 @@ def pick_markers(canvases, targets):
 
 
 # ---- the build ----
-def build(m):
-    """`m`: an echodata.Manifest without EchoLazyTablet. -> dict(resources, layout, notes, page)."""
+def build(m, holo=None):
+    """`m`: an echodata.Manifest without EchoLazyTablet. -> dict(resources, layout, notes, page).
+    `holo`: put the HOLO tab in (default: when the hologram chassis mod is in `m`, or ECHOQUEUE_HOLO
+    says so). Its page is built either way (hidden), so the overlay is the same for the plugin."""
+    if holo is None:
+        import os
+        forced = os.environ.get('ECHOQUEUE_HOLO')
+        holo = forced == '1' if forced in ('0', '1') else m.get(*HOLO_MATERIAL) is not None
+    holo = bool(holo)
     notes = []
     if m.get(CV, PAGE) is not None or m.get(CV, OVERLAY) is not None:
         raise TabletError('The PLAY tab is still in the game data; take EchoLazyTablet out first.')
@@ -374,8 +477,9 @@ def build(m):
                         'It keeps working: EchoLazyTablet only moves its tabs along to make room.')
     elif details:
         notes.insert(0, 'Another mod has changed your tablet. EchoLazyTablet builds around it and leaves it as it is.')
-    centers = tab_centers(len(tabs) + 2)
-    for t, new in zip(tabs, centers[2:]):
+    ours = 3 if holo else 2                 # SFX, PLAY (and HOLO) come first
+    centers = tab_centers(len(tabs) + ours)
+    for t, new in zip(tabs, centers[ours:]):
         dx = new - t['center']
         for i in t['elements']:
             x0, y0, x1, y1 = Canvas.rect(nav.elements[i])
@@ -390,6 +494,8 @@ def build(m):
     tab_rect = (c - TAB_SIZE / 2, BAR_Y[0], c + TAB_SIZE / 2, BAR_Y[1])
     c = centers[0]
     sound_tab_rect = (c - TAB_SIZE / 2, BAR_Y[0], c + TAB_SIZE / 2, BAR_Y[1])
+    c = centers[2] if holo else centers[1]   # (without the mod: hidden, on PLAY's spot)
+    holo_tab_rect = (c - TAB_SIZE / 2, BAR_Y[0], c + TAB_SIZE / 2, BAR_Y[1])
 
     # Everything EchoLazyTablet shows is one overlay canvas covering the tablet, shown by the root's
     # unused element 6, so no canvas another mod checks changes its element count. The PLAY
@@ -578,6 +684,77 @@ def build(m):
         e[f'sound_text_{i}'] = text(f'echo_queue_sound_{i}_text_v1', 'TAP TO SET', (x0 + 6, y0 + 64, x0 + SOUND_PAD_W - 6, y0 + SOUND_PAD_H - 14), 26, WHITE)
         sound_rects.append(rect)
 
+    # The HOLO page (see HOLO_CONTROLS). Built even without the mod (hidden, never shown), so
+    # element numbers don't move. Buttons are dark pills; lit (the plugin shows it) a teal pill
+    # with a light edge. The field and grey bar are pictures; their touch areas are a grid over
+    # them, each with a ring (hidden) at its centre.
+    group = e['holo_page'] = sprite('echo_queue_holo_page_v1', (PAGE_X, PAGE_Y, PAGE_X + PAGE_W, PAGE_Y + PAGE_H),
+                                    screen_uv((PAGE_X, PAGE_Y, PAGE_X + PAGE_W, PAGE_Y + PAGE_H)), WHITE, parent=-1, hidden=True)
+    sprite('echo_queue_holo_card_v1', CARD, CARD_UV, WHITE)
+    holo_rects, holo_frames, holo_fills, holo_texts = {}, {}, {}, {}
+
+    def holo_btn(key, rect, words, size=20, shape='holo_pill', words_rgba=WHITE):
+        x0, y0, x1, y1 = rect
+        holo_rects[key] = rect
+        holo_fills[key] = sprite(f'echo_queue_holo_{key}_base_v2', rect, icon_uvs[shape], HOLO_BTN, texture=ICON_TEXTURE)
+        lit = holo_frames[key] = sprite(f'echo_queue_holo_{key}_lit_v2', (x0 - 2, y0 - 2, x1 + 2, y1 + 2), icon_uvs[shape], HOLO_EDGE,
+                                        hidden=True, texture=ICON_TEXTURE)
+        sprite(f'echo_queue_holo_{key}_lit_fill_v2', (4, 4, x1 - x0, y1 - y0), icon_uvs[shape], HOLO_LIT, parent=lit, texture=ICON_TEXTURE)
+        if words:
+            holo_texts[key] = text(f'echo_queue_holo_{key}_text_v2', words, rect, size, words_rgba)
+
+    # left: which one, the preview, HOLOGRAM BLUE
+    text('echo_queue_holo_editing_v2', 'EDITING', (24, 20, 232, 42), 15, DIM)
+    for b, name in enumerate(HOLO_BAR_LABELS):
+        holo_btn(f'edit_{HOLO_BARS[b]}', (24, 46 + b * 56, 232, 92 + b * 56), name)
+    sprite('echo_queue_holo_preview_edge_v2', (54, 218, 202, 366), icon_uvs['dot'], (.92, .94, .96, 1), texture=ICON_TEXTURE)
+    e['holo_preview'] = sprite('echo_queue_holo_preview_v2', (58, 222, 198, 362), icon_uvs['dot'], (.19, .75, 1, 1), texture=ICON_TEXTURE)
+    e['holo_hex'] = text('echo_queue_holo_hex_v2', '#30BFFF', (24, 370, 232, 396), 22, WHITE, capacity=16)
+    holo_btn('reset', (24, 418, 232, 464), 'HOLOGRAM BLUE', 19, words_rgba=(.19, .75, 1, 1))
+
+    # middle: the field, the grey bar, the - / + rows
+    fx0, fy0, fx1, fy1 = HOLO_FIELD
+    sprite('echo_queue_holo_field_v2', HOLO_FIELD, icon_uvs['holo_field'], WHITE, texture=ICON_TEXTURE)
+    sprite('echo_queue_holo_grey_v2', HOLO_GREY_BAR, icon_uvs['holo_grey'], WHITE, texture=ICON_TEXTURE)
+
+    def ring(key, rect):
+        x0, y0, x1, y1 = rect
+        cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+        holo_rects[key] = rect
+        holo_frames[key] = sprite(f'echo_queue_holo_{key}_ring_v2', (cx - 14, cy - 14, cx + 14, cy + 14), icon_uvs['holo_ring'], WHITE,
+                                  hidden=True, texture=ICON_TEXTURE)
+
+    cw, rh = (fx1 - fx0) / HOLO_FIELD_COLS, (fy1 - fy0) / HOLO_FIELD_ROWS
+    for r in range(HOLO_FIELD_ROWS):
+        for c in range(HOLO_FIELD_COLS):
+            ring(f'field_{r}_{c}', (fx0 + c * cw, fy0 + r * rh, fx0 + (c + 1) * cw, fy0 + (r + 1) * rh))
+    gx0, gy0, gx1, gy1 = HOLO_GREY_BAR
+    gw = (gx1 - gx0) / HOLO_GREYS
+    for i in range(HOLO_GREYS):
+        ring(f'grey_{i}', (gx0 + i * gw, gy0 - 2, gx0 + (i + 1) * gw, gy1 + 2))
+    y0, y1 = 404, 452
+    words = {'hue': ('< COLOUR', 'COLOUR >'), 'light': ('DARKER', 'LIGHTER'), 'sat': ('PALER', 'BOLDER')}
+    for i, (key, name) in enumerate(zip(HOLO_FINE, ('NUDGE COLOUR', 'BRIGHTNESS', 'VIVIDNESS'))):
+        x = 252 + i * 176
+        text(f'echo_queue_holo_{key}_label_v2', name, (x, y0 - 24, x + 168, y0 - 4), 15, ACCENT)
+        holo_btn(f'{key}_minus', (x, y0, x + 82, y1), words[key][0], 16, shape='holo_tile')
+        holo_btn(f'{key}_plus', (x + 86, y0, x + 168, y1), words[key][1], 16, shape='holo_tile')
+
+    # right: RAINBOW and its speed, ARMS
+    holo_btn('rainbow', (792, 22, 976, 118), None, shape='holo_box')
+    text('echo_queue_holo_rainbow_text_v2', 'RAINBOW', (792, 30, 976, 80), 26, WHITE)
+    sprite('echo_queue_holo_rainbow_strip_v2', (808, 90, 960, 102), icon_uvs['holo_rainbow'], WHITE, texture=ICON_TEXTURE)
+    text('echo_queue_holo_speed_caption_v2', 'RAINBOW SPEED', (792, 138, 976, 160), 15, DIM)
+    for i in range(HOLO_SPEEDS):
+        x = 792 + i * 37.5
+        holo_btn(f'speed_{i}', (x, 166, x + 34, 200), str(i + 1), 19, shape='dot')
+    text('echo_queue_holo_look_caption_v2', 'ARMS', (792, 234, 976, 256), 15, DIM)
+    for i, name in enumerate(('SOLID', 'SEE-THROUGH', 'SOLID HANDS', 'CLEAR HANDS')):
+        holo_btn(f'look_{HOLO_LOOKS[i]}', (792, 262 + i * 46, 976, 304 + i * 46), name, 18, shape='holo_pill_short')
+    text('echo_queue_holo_look_note_v2', 'CHANGES NEXT TIME', (792, 444, 976, 459), 13, DIM)
+    text('echo_queue_holo_look_note2_v2', 'YOU START ECHO', (792, 459, 976, 474), 13, DIM)
+    e['holo_status'] = text('echo_queue_holo_status_v2', 'TAP A COLOUR, THEN FINE-TUNE IT WITH THE BUTTONS UNDER IT', (24, 478, 976, 506), 17, DIM, capacity=96)
+
     # The title strip (a cover over the stock title, PLAY's own title) and the tab, top level.
     group = -1
     title_area = (54, 22, 822, 103)
@@ -603,6 +780,8 @@ def build(m):
     tab_selected = sprite('echo_queue_tab_selected_v1', tab_rect, icon_uvs['tab_selected'], WHITE, hidden=True, texture=ICON_TEXTURE)
     sound_tab_icon = sprite('echo_queue_sound_tab_icon_v1', sound_tab_rect, icon_uvs['sound_idle'], WHITE, texture=ICON_TEXTURE)
     sound_tab_selected = sprite('echo_queue_sound_tab_selected_v1', sound_tab_rect, icon_uvs['sound_selected'], WHITE, hidden=True, texture=ICON_TEXTURE)
+    holo_tab_icon = sprite('echo_queue_holo_tab_icon_v1', holo_tab_rect, icon_uvs['holo_idle'], WHITE, hidden=not holo, texture=ICON_TEXTURE)
+    holo_tab_selected = sprite('echo_queue_holo_tab_selected_v1', holo_tab_rect, icon_uvs['holo_selected'], WHITE, hidden=True, texture=ICON_TEXTURE)
 
     # The root's element 6 (stock: a hidden 96 px panel above the tablet, unused) becomes the
     # overlay's child-canvas element; it keeps its name and index (VR-tested 23 Oct).
@@ -662,6 +841,10 @@ def build(m):
     add_button(SOUND_EDIT_BUTTON, SOUND_EDIT)
     for i, rect in enumerate(sound_rects):
         add_button(sound_button(i), rect)
+    if holo:   # without the mod there's nothing to touch: no tab, no segments
+        add_button(HOLO_TAB_BUTTON, holo_tab_rect, on_page=False)
+        for key in HOLO_CONTROLS:
+            add_button(holo_button(key), holo_rects[key])
     moved_rows = {r for t in tabs for r in t['rows']}
     for r, old in enumerate(old_rows):
         assert r in moved_rows or buttons.rows[r] == old
@@ -672,7 +855,8 @@ def build(m):
     e.update(page=page_group, cover=cover, header=header, title=title, subtitle=subtitle, subtitle_box=subtitle_box,
              subtitle_box_wide=subtitle_box_wide, clock=clock, clock_format=clock_format,
              clock_format_text=clock_format_text, tab_icon=tab_icon, tab_selected=tab_selected,
-             sound_tab_icon=sound_tab_icon, sound_tab_selected=sound_tab_selected)
+             sound_tab_icon=sound_tab_icon, sound_tab_selected=sound_tab_selected,
+             holo_tab_icon=holo_tab_icon, holo_tab_selected=holo_tab_selected)
 
     # How the plugin will recognise each canvas, given every canvas in the game after this build.
     final = {}
@@ -693,8 +877,11 @@ def build(m):
     other_tabs = sorted({u64(buttons.rows[r], 0) for t in foreign for r in t['rows']})
     layout = dict(version=2, canvases=[markers[n] for n in kinds], root_slot=ROOT_SLOT,
                   nav_stock_selected=hide_selected, nav_other_selected=others_selected, other_tabs=other_tabs,
-                  overlay_elements=len(page.elements))
-    return dict(resources=resources, layout=layout, notes=notes, details=details, page=e, tabs=len(tabs) + 2)
+                  overlay_elements=len(page.elements), holo=int(holo))
+    return dict(resources=resources, layout=layout, notes=notes, details=details, page=e, tabs=len(tabs) + ours,
+                holo_frames=[holo_frames[k] for k in HOLO_CONTROLS],
+                fine_fills=[holo_fills[f'{k}_{x}'] for k in HOLO_FINE for x in ('minus', 'plus')],
+                fine_texts=[holo_texts[f'{k}_{x}'] for k in HOLO_FINE for x in ('minus', 'plus')])
 
 
 def texture_image(cpu, gpu):
@@ -777,6 +964,7 @@ def layout_ini(layout):
     lines.append('nav_stock_selected=' + ','.join(map(str, layout['nav_stock_selected'])))
     lines.append('nav_other_selected=' + ','.join(map(str, layout['nav_other_selected'])))
     lines.append('other_tabs=' + ','.join(f'{n:016x}' for n in layout.get('other_tabs', ())))  # their tab buttons
+    lines.append(f"holo={layout.get('holo', 0)}")   # the HOLO tab is in (the hologram chassis mod is installed)
     return '\r\n'.join(lines) + '\r\n'
 
 
@@ -795,6 +983,18 @@ def page_header(built):
             f"constexpr unsigned QUEUE_OVERLAY_ELEMENTS={built['layout']['overlay_elements']}, QUEUE_LAYOUT_VERSION={built['layout']['version']};\n"
             + ''.join(f'constexpr unsigned QUEUE_PAGE_{k.upper()}={v};\n' for k, v in e.items()
                       if not k.startswith('key_') or k in ('key_no_clip_app_text', 'key_ctrl_text', 'key_shift_text', 'key_alt_text'))
+            + f'constexpr uint64_t QUEUE_HOLO_TAB=0x{HOLO_TAB_BUTTON:016x};\n'
+            + f'constexpr unsigned HOLO_BAR_COUNT={len(HOLO_BARS)}, HOLO_SPEEDS={HOLO_SPEEDS}, HOLO_LOOKS={len(HOLO_LOOKS)}, HOLO_FINE={len(HOLO_FINE)}, HOLO_CONTROL_COUNT={len(HOLO_CONTROLS)};\n'
+            + f"constexpr unsigned HOLO_RESET={HOLO_CONTROLS.index('reset')}, HOLO_RAINBOW={HOLO_CONTROLS.index('rainbow')}, "
+            + f"HOLO_SPEED_FIRST={HOLO_CONTROLS.index('speed_0')}, HOLO_LOOK_FIRST={HOLO_CONTROLS.index('look_solid')}, HOLO_FINE_FIRST={HOLO_CONTROLS.index('hue_minus')};\n"
+            + f"constexpr unsigned HOLO_FIELD_FIRST={HOLO_CONTROLS.index('field_0_0')}, HOLO_FIELD_COLS={HOLO_FIELD_COLS}, HOLO_FIELD_ROWS={HOLO_FIELD_ROWS}, "
+            + f"HOLO_GREY_FIRST={HOLO_CONTROLS.index('grey_0')}, HOLO_GREYS={HOLO_GREYS};\n"
+            + f'constexpr float HOLO_FIELD_TOP={HOLO_FIELD_TOP}f, HOLO_FIELD_SPAN={HOLO_FIELD_SPAN}f;\n'
+            + 'constexpr uint64_t QUEUE_HOLO_BUTTONS[] = {' + ', '.join(f'0x{holo_button(k):016x}' for k in HOLO_CONTROLS) + '};\n'
+            + 'constexpr unsigned QUEUE_HOLO_FRAMES[] = {' + ', '.join(map(str, built['holo_frames'])) + '};\n'
+            + 'constexpr unsigned QUEUE_HOLO_FINE_FILLS[] = {' + ', '.join(map(str, built['fine_fills'])) + '};\n'
+            + 'constexpr unsigned QUEUE_HOLO_FINE_TEXTS[] = {' + ', '.join(map(str, built['fine_texts'])) + '};\n'
+            + 'constexpr const char* HOLO_BAR_LABELS[] = {' + ', '.join(f'"{l}"' for l in HOLO_BAR_LABELS) + '};\n'
             + 'struct QueueKey { uint64_t name; const char* label; };\nconstexpr QueueKey QUEUE_KEYS[] = {'
             + ', '.join(f'{{0x{key_button(k):016x}, "{k}"}}' for k in [k for row in KEYBOARD_ROWS for k in row] + list(KEYBOARD_EXTRA))
             + '};\n')

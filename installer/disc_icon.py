@@ -162,3 +162,18 @@ def speaker(size):
         a.ellipse(box(r_in), fill=CLEAR)
         img.alpha_composite(ring)
     return img.resize((size, size), Image.LANCZOS)
+
+
+def palette(size):
+    """The HOLO tab: six dots round a ring, like a colour wheel, with a dot in the middle."""
+    s = 4
+    w = size * s
+    img = Image.new('RGBA', (w, w), CLEAR)
+    d = ImageDraw.Draw(img)
+    c, ring, r = w / 2, w * .34, w * .12
+    for k in range(6):
+        a = math.radians(k * 60 - 90)
+        x, y = c + ring * math.cos(a), c + ring * math.sin(a)
+        d.ellipse((x - r, y - r, x + r, y + r), fill=WHITE)
+    d.ellipse((c - r * .8, c - r * .8, c + r * .8, c + r * .8), fill=WHITE)
+    return img.resize((size, size), Image.LANCZOS)

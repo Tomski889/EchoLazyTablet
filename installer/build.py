@@ -85,6 +85,15 @@ def main():
     PAYLOAD.mkdir()
     shutil.copy2(dll, PAYLOAD / 'EchoLazyTablet.dll')
     shutil.copy2(ROOT / 'EchoLazyTablet.ini', PAYLOAD / 'EchoLazyTablet.ini')
+    # the hologram arms' builder and installer (echo-modding-tool, built with
+    # cargo build --release --examples -p echo-core; ECHO_MODDING_TOOL says where it is)
+    import os
+    tools = Path(os.environ.get('ECHO_MODDING_TOOL', r'E:\OneDrive\Documents\echo-modding-tool')) / 'target/release/examples'
+    (PAYLOAD / 'arms').mkdir()
+    for name in ('holo_whole', 'install_flat', 'verify_flat'):
+        if not (tools / f'{name}.exe').is_file():
+            raise SystemExit(f'Build echo-modding-tool first: {tools / name}.exe is missing.')
+        shutil.copy2(tools / f'{name}.exe', PAYLOAD / 'arms' / f'{name}.exe')
     text = notices(('EchoLazyTablet', 'EchoLazyTablet and its installer: by the EchoLazyTablet author. The tablet art is drawn at install time '
                                  "from the player's own copy of Echo VR; no game files are included."),
                    [('MinHook (in EchoLazyTablet.dll)', ROOT / 'vendor/minhook/LICENSE.txt'),
@@ -94,7 +103,10 @@ def main():
                     *WINDOW_LICENCES,
                     ('Python', Path(sys.base_prefix) / 'LICENSE.txt'),
                     ('Tcl/Tk (one licence for both)', Path(sys.base_prefix) / 'tcl/tk8.6/license.terms')],
-                   WINDOW_NOTES)
+                   WINDOW_NOTES + [('echo-modding-tool (payload/arms: holo_whole, install_flat, verify_flat)',
+                                    "Builds and installs the hologram arms from the player's own game data. "
+                                    'Its Rust crates: zstd and zstd-sys (MIT/Apache-2.0; Zstandard BSD), texture2ddecoder, '
+                                    'texpresso, gltf, meshopt and thiserror (MIT and/or Apache-2.0).')])
     (PAYLOAD / 'THIRD_PARTY_NOTICES.txt').write_text(text, encoding='utf-8')
     work = ROOT / 'build/installer'
     work.mkdir(parents=True, exist_ok=True)
