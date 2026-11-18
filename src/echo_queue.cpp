@@ -207,6 +207,23 @@ Show showFn; Text textFn; Alpha alphaFn; Mask enableFn, disableFn;
 // Redraw counters for the perf line in the log (each of these makes the tablet redraw).
 // Also EchoLazyTablet's own time in the per-frame and per-sound hooks.
 struct Perf { std::atomic<U> show{0}, text{0}, alpha{0}, mask{0}, ticks{0}, ns{0}, hookNs{0}, frames{0}, soundNs{0}, sounds{0}; } perf;
+// EchoLazyTablet's own background threads (holo, its scout, live colours): their CPU time goes in the perf line too.
+struct Background { std::atomic<HANDLE> thread{nullptr}; const char* name = ""; U lastCpu = 0; };
+Background backgrounds[4];
+std::atomic<int> backgroundCount{0};
+void registerBackground(const char* name) {
+    int i = backgroundCount.fetch_add(1);
+    if (i >= 4) return;
+    HANDLE h = nullptr;
+    DuplicateHandle(GetCurrentProcess(), GetCurrentThread(), GetCurrentProcess(), &h, THREAD_QUERY_LIMITED_INFORMATION, FALSE, 0);
+    backgrounds[i].name = name;
+    backgrounds[i].thread = h;
+}
+U threadCpu100ns(HANDLE h) {
+    FILETIME c, e, k, u;
+    if (!h || !GetThreadTimes(h, &c, &e, &k, &u)) return 0;
+    return ((U(k.dwHighDateTime) << 32) | k.dwLowDateTime) + ((U(u.dwHighDateTime) << 32) | u.dwLowDateTime);
+}
 U qpcNs();
 U show(void* c, unsigned e, int v) { perf.show++; return showFn(c, e, v); }
 U text(void* c, unsigned e, const char* s) { perf.text++; return textFn(c, e, s); }
@@ -479,9 +496,29 @@ void learnJoiningMatch(uint32_t id) {
     logf("sound: learnt the announcer's \"Joining Match\" (%08x)", id);
 }
 
+// SOUND LOG: while in an arena match, the first time each (event, object) plays it's logged, so the arena's own
+// events (goal horn, announcer lines, countdown) can be matched to what happened (the live: goal lines) later.
+std::atomic<bool> soundLogArena{false};
+std::atomic<uint64_t> soundSeen[512];
+std::atomic<int> soundSeenCount{0};
+
+void logArenaSound(uint32_t id, U object) {
+    uint64_t key = (uint64_t(id) << 32) | uint32_t(object) | 1;   // never 0
+    for (unsigned i = 0, h = (id ^ uint32_t(object) * 0x9e3779b9u) & 511; i < 512; i++, h = (h + 1) & 511) {
+        uint64_t was = soundSeen[h].load(std::memory_order_relaxed);
+        if (was == key) return;
+        if (was == 0) {
+            if (!soundSeen[h].compare_exchange_strong(was, key)) { if (was == key) return; continue; }
+            if (soundSeenCount.fetch_add(1) < 400) logf("sound: arena event %08x on %llx", id, object);
+            return;
+        }
+    }
+}
+
 uint32_t postEventDetour(uint32_t id, U object, uint32_t flags, void* callback, void* cookie, uint32_t externals,
                          void* external, uint32_t playing) {
     U t0 = qpcNs();
+    if (soundLogArena.load(std::memory_order_relaxed)) logArenaSound(id, object);
     if ((id == SOUND_CLICK || id == SOUND_TOGGLE_ON || id == SOUND_TOGGLE_OFF) && tabletObject.exchange(object) != object)
         logf("sound: the tablet's sound object is %llx", object);
     if ((id == VOICE_FINDING_MATCH || id == VOICE_MATCHMAKING_CANCELLED) && announcerObject.exchange(object) != object)
@@ -1651,14 +1688,22 @@ bool readSelf(uintptr_t at, void* out, size_t n) {
 }
 
 // Every signed copy in plain read-write memory (the game's loaded data; its GPU upload buffers are
-// write-combined and rebuilt from these each frame, so they're skipped).
+// write-combined and rebuilt from these each frame, so they're skipped). The plugin's own copies of blocks
+// (Block::snap, the writer's buffer) have their colours blanked, and this scan's own buffer and thread stack are
+// skipped: before 15 Nov they were found too, so every rescan found copies of copies (267350 "copies", a 200 s
+// scan and a writer checking them all 10 times a second, late in a long session on 14 Nov).
 std::vector<Block> scan() {
     std::vector<Block> out;
     std::vector<uint8_t> buf(4 << 20);
+    uintptr_t bufLo = uintptr_t(buf.data()), bufHi = bufLo + buf.size();
+    MEMORY_BASIC_INFORMATION self{};
+    int here = 0;
+    VirtualQuery(&here, &self, sizeof self);
     MEMORY_BASIC_INFORMATION mbi;
     for (uintptr_t at = 0x10000; VirtualQuery(reinterpret_cast<LPCVOID>(at), &mbi, sizeof mbi); at = uintptr_t(mbi.BaseAddress) + mbi.RegionSize) {
         if (mbi.State != MEM_COMMIT || mbi.Type != MEM_PRIVATE || mbi.Protect != PAGE_READWRITE) continue;
         uintptr_t start = uintptr_t(mbi.BaseAddress), end = start + mbi.RegionSize;
+        if (mbi.AllocationBase == self.AllocationBase) continue;
         for (uintptr_t chunk = start; chunk < end; chunk += buf.size() - 16) {
             size_t n = std::min<uintptr_t>(buf.size(), end - chunk);
             if (n < 12 || !readSelf(chunk, buf.data(), n)) break;
@@ -1666,6 +1711,7 @@ std::vector<Block> scan() {
                 uint32_t w;
                 memcpy(&w, &buf[i], 4);
                 if (w != SIGN_D4[0] || memcmp(&buf[i], SIGN_D4, 12) != 0) continue;
+                if (chunk + i >= bufLo && chunk + i < bufHi) continue;
                 uintptr_t base = chunk + i - COLOURS[1];
                 Block b{base, 0, std::vector<uint8_t>(BLOCK), {}};
                 uint32_t blue;
@@ -1676,7 +1722,7 @@ std::vector<Block> scan() {
                 uint32_t z;
                 memcpy(&z, &b.snap[COLOURS[0] + 8], 4);
                 if (z != 0x3f800001) continue;
-                for (int c = 0; c < 3; c++) memcpy(b.orig[c], &b.snap[COLOURS[c]], 12);
+                for (int c = 0; c < 3; c++) memcpy(b.orig[c], &b.snap[COLOURS[c]], 12), memset(&b.snap[COLOURS[c]], 0, 12);   // (masked anyway)
                 bool known = false;
                 for (auto& o : out) known |= o.base == base;
                 if (!known) out.push_back(std::move(b));
@@ -2006,6 +2052,8 @@ std::vector<Block> fresh;
 // The scout: where the player is (Echo's API, every 2 s) and the memory search (slow: seconds), on
 // a thread of its own so the writer never waits on it.
 DWORD WINAPI scout(LPVOID) {
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_LOWEST);   // its memory scans never take time from Echo's frames
+    registerBackground("holo scout");
     U scannedAt = 0, askedAt = 0, whereChangedAt = 0;
     int lastWhere = -1;
     for (;;) {
@@ -2044,6 +2092,8 @@ DWORD WINAPI scout(LPVOID) {
 // read whole and written back only while everything but its colours is as first found (freed or
 // reused memory is dropped, never written); the three colours go back in one write.
 DWORD WINAPI watch(LPVOID) {
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);   // its writes yield to Echo's own threads
+    registerBackground("holo");
     if (HANDLE t = CreateThread(nullptr, 0, scout, nullptr, 0, nullptr)) CloseHandle(t);
     HANDLE timer = CreateWaitableTimerExW(nullptr, nullptr, 0x2 /* CREATE_WAITABLE_TIMER_HIGH_RESOLUTION */, TIMER_ALL_ACCESS);
     if (!timer) timer = CreateWaitableTimerW(nullptr, FALSE, nullptr);
@@ -2099,6 +2149,7 @@ DWORD WINAPI watch(LPVOID) {
                 SIZE_T wrote = 0;
                 WriteProcessMemory(GetCurrentProcess(), reinterpret_cast<LPVOID>(it->base + FROM), &now[FROM], TO - FROM, &wrote);
             }
+            for (size_t c : COLOURS) memset(&now[c], 0, 12);   // (no signed copy left in the plugin's own memory)
             ++it;
         }
         found = int(blocks.size());
@@ -2621,6 +2672,10 @@ struct Context {
     bool naming = false;        // after an SFX button's key: typing its name on the same keyboard
     std::string name, keyCtrlText, keyShiftText, keyAltText;
     std::string soundStatus, soundEditText;
+    bool themes = false;                 // the MAPS page shows the ARENA THEMES
+    int effects = 0;                     // ... or the LIVE ARENA effects (their page, 1 to 3)
+    bool weather = false;                // ... or the ARENA WEATHER (the THEMES tab's last page)
+    std::vector<float> cardOrig, cardTints;   // the cards' name + caption colours: as built, and as tinted now
     std::string holoStatus, holoHex;
     std::vector<float> holoTints;   // the slider and preview colours last written
     U holoHeld = 0, holoHeldAt = 0, holoRepeatAt = 0, holoActor = 0;   // a - / + being held (repeats): its control + 1
@@ -2667,7 +2722,7 @@ int holoButton(U n) {
 }
 bool onOurPage(const Context& c) { return c.page == Page::Queue || c.page == Page::Sounds || c.page == Page::Holo; }
 bool isOurs(U n) {
-    if (n == QUEUE_HOLO_TAB || holoButton(n) >= 0) return true;
+    if (n == QUEUE_HOLO_TAB || n == QUEUE_THEMES_TAB || holoButton(n) >= 0) return true;
     if (keyFor(n) || n == QUEUE_CLIP_KEY || soundPad(n) >= 0 || n == QUEUE_SOUND_TAB || n == QUEUE_SOUND_EDIT) return true;
     return n == QUEUE_TAB || n == QUEUE_START || n == QUEUE_COMBAT || n == QUEUE_UPDATE || n == QUEUE_CANCEL || n == QUEUE_LOBBY || n == QUEUE_PRIVATE || n == QUEUE_STATS ||
            n == QUEUE_GFX_HIGH || n == QUEUE_GFX_LOW || n == QUEUE_CLIP || n == QUEUE_CLOCK || n == QUEUE_PLAY_CLOCK || n == QUEUE_CLOCK_12 || n == QUEUE_CLOCK_24;
@@ -2738,8 +2793,11 @@ bool writeFile(const std::wstring& path, const std::string& data);
 // version in the game data and keeps each manifest it patched each way, as <manifest>.holo-solid,
 // .holo-clear and .holo-hands (the live one and, with the GRAPHICS switch set up, both potato ones). Choosing copies those over them; the
 // live manifest takes the potato one it is a copy of, so GRAPHICS LOW / HIGH keep working.
-const wchar_t* const LOOK_SUFFIX[HOLO_LOOKS] = {L".holo-solid", L".holo-clear", L".holo-hands", L".holo-clear-hands"};
-const char* const LOOK_NAME[HOLO_LOOKS] = {"SOLID", "SEE-THROUGH", "SOLID HANDS", "CLEAR HANDS"};
+// NORMAL ARMS (.holo-normal) is the game's own chassis: the solid look with the arms' files pointed back
+// at the original data (echo-modding-tool's holo_normal / install_flat make it).
+const wchar_t* const LOOK_SUFFIX[HOLO_LOOKS] = {L".holo-solid", L".holo-clear", L".holo-hands", L".holo-clear-hands", L".holo-normal"};
+const char* const LOOK_NAME[HOLO_LOOKS] = {"HOLO ARMS", "SEE-THROUGH ARMS", "JUST HANDS", "SEE-THROUGH HANDS", "NORMAL ARMS"};
+constexpr int NORMAL_LOOK = 4;
 std::atomic<int> armsLoaded{-2};   // which one this start is using (-1 not set up; -2 not looked yet)
 std::atomic<int> armsChosen{-1};   // what was last chosen (for the next start)
 
@@ -2786,10 +2844,14 @@ std::string switchArmsLook(int look) {
         return "COULDN'T SWITCH - SEE ECHOLAZYTABLET.LOG";
     }
     armsChosen = look;
-    holo::liveLook = look;
+    // the live header write only knows the hologram looks; NORMAL (and leaving NORMAL) is a different
+    // material altogether, so it waits for the next start
+    holo::liveLook = look == NORMAL_LOOK || armsLoaded == NORMAL_LOOK ? -1 : look;
     WritePrivateProfileStringW(L"holo", L"arms", LOOK_SUFFIX[look] + 6, iniPath().c_str());
     logf("holo: arms: %s chosen for the next start", name);
-    return std::string(name) + (look == armsLoaded ? " - ON" : " - ON NOW IF IT CAN, OR AFTER A RESTART");
+    if (look == armsLoaded) return std::string(name) + " - ON";
+    if (look == NORMAL_LOOK || armsLoaded == NORMAL_LOOK) return std::string(name) + " - RESTART ECHO TO SEE THEM";
+    return std::string(name) + " - ON NOW IF IT CAN, OR AFTER A RESTART";
 }
 
 bool writeFile(const std::wstring& path, const std::string& data) {
@@ -2803,6 +2865,971 @@ bool writeFile(const std::wstring& path, const std::string& data) {
     DeleteFileW(tmp.c_str());
     SetLastError(error);
     return false;
+}
+
+// ---- ARENA MAPS (on the page that was SFX): what's outside the arena. echo-modding-tool's install_maps keeps
+// every manifest once per map, <manifest><potato>.map-<name><arms look>; choosing one copies its set over the
+// plain ones, the way the ARMS looks do, so it's on at the next start. The live manifest follows the
+// potato one it's a copy of (GRAPHICS LOW / HIGH), and the arms look in use is kept.
+constexpr int MAPS = 8;
+const char* const MAP_ID[MAPS] = {"day", "night", "sunset", "kronos", "snow", "aurora", "asteroids", "bedroom"};
+const char* const MAP_NAME[MAPS] = {"MOUNTAINS", "NIGHT MOUNTAINS", "SUNSET", "KRONOS SHIP", "SNOWY PEAKS", "AURORA NIGHT", "ASTEROID BELT", "GIANT BEDROOM"};
+std::atomic<int> mapLoaded{-2};   // the map this start is using (-1 not set up or unknown; -2 not looked yet)
+std::atomic<int> mapChosen{-1};   // the map chosen for the next start
+
+std::wstring mapSuffix(int k) {
+    std::string id = MAP_ID[k];
+    return L".map-" + std::wstring(id.begin(), id.end());
+}
+
+bool mapsInstalled() {   // (looked at again every few seconds: it's asked for every frame the page is up)
+    static U checkedAt = 0;
+    static bool there = false;
+    U now = GetTickCount64();
+    if (!checkedAt || now - checkedAt > 3000) {
+        there = GetFileAttributesW((manifestPath() + mapSuffix(2)).c_str()) != INVALID_FILE_ATTRIBUTES;
+        checkedAt = now;
+    }
+    return there;
+}
+
+int mapShown() {
+    if (mapLoaded == -2) {   // once: which map's copy the live manifest is
+        std::wstring m = manifestPath();
+        std::string live;
+        int found = -1;
+        if (readFile(m, live))
+            for (int k = 0; k < MAPS && found < 0; k++)
+                for (const wchar_t* potato : {L"", L".potato-high", L".potato-low"}) {
+                    std::string data;
+                    if (readFile(m + potato + mapSuffix(k), data) && data == live) { found = k; break; }
+                    for (const wchar_t* look : LOOK_SUFFIX)
+                        if (readFile(m + potato + mapSuffix(k) + look, data) && data == live) { found = k; break; }
+                    if (found >= 0) break;
+                }
+        mapLoaded = found;
+        logf("maps: this start: %s", found >= 0 ? MAP_NAME[found] : "unknown");
+    }
+    return mapChosen >= 0 ? mapChosen.load() : mapLoaded.load();
+}
+
+// ---- switching the map for the next match, in the manifest the game read at startup. install_maps puts
+// every map's frames in every manifest and writes <manifest>.maps.bin: the rows any map has and, per map,
+// each row's frame (counted from the first of the maps' frames) and size. Found in memory by the arena's
+// transform table row, whose frame and size for the map this start is using are known; the contents rows
+// round it must be sorted (type, file) pairs, and a few more rows are checked before anything is written.
+struct MapsTable {
+    std::vector<std::pair<U, U>> keys;
+    std::vector<std::string> names;
+    std::vector<std::vector<std::pair<uint32_t, uint32_t>>> rows;   // per map: (frame, size) per key
+};
+bool loadMapsTable(MapsTable& t) {
+    std::string b;
+    if (!readFile(manifestPath() + L".maps.bin", b) || b.size() < 16 || b.compare(0, 4, "MAPS") != 0) return false;
+    auto u32 = [&](size_t o) { uint32_t v; memcpy(&v, b.data() + o, 4); return v; };
+    auto u64 = [&](size_t o) { U v; memcpy(&v, b.data() + o, 8); return v; };
+    uint32_t maps = u32(8), n = u32(12);
+    if (u32(4) != 1 || b.size() != 16 + size_t(n) * 16 + size_t(maps) * (16 + size_t(n) * 8)) return false;
+    size_t o = 16;
+    for (uint32_t i = 0; i < n; i++, o += 16) t.keys.push_back({u64(o), u64(o + 8)});
+    for (uint32_t m = 0; m < maps; m++) {
+        t.names.push_back(std::string(b.data() + o, strnlen(b.data() + o, 16)));
+        o += 16;
+        std::vector<std::pair<uint32_t, uint32_t>> r;
+        for (uint32_t i = 0; i < n; i++, o += 8) r.push_back({u32(o), u32(o + 4)});
+        t.rows.push_back(std::move(r));
+    }
+    return true;
+}
+
+struct LiveRows { char* base = nullptr; size_t count = 0; uint32_t first = 0; int map = -1; };
+std::mutex liveRowsMutex;
+LiveRows liveRows;   // under liveRowsMutex
+std::atomic<bool> mapMemBusy{false};
+
+int64_t keyCmp(const char* row, U type, U file) {   // signed (type, file) order, as the manifest is sorted
+    int64_t rt, rf;
+    memcpy(&rt, row, 8);
+    memcpy(&rf, row + 8, 8);
+    if (rt != int64_t(type)) return rt < int64_t(type) ? -1 : 1;
+    if (rf != int64_t(file)) return rf < int64_t(file) ? -1 : 1;
+    return 0;
+}
+
+char* findRow(const LiveRows& l, U type, U file) {
+    size_t lo = 0, hi = l.count;
+    while (lo < hi) {
+        size_t mid = (lo + hi) / 2;
+        int64_t c = keyCmp(l.base + mid * 32, type, file);
+        if (c == 0) return l.base + mid * 32;
+        if (c < 0) lo = mid + 1; else hi = mid;
+    }
+    return nullptr;
+}
+
+// Finds the contents rows of the manifest in memory (once). -> false if not found or not as expected.
+bool findLiveRows(const MapsTable& t, int map, LiveRows& out) {
+    const U AT = 0x92abd3e1432bf5e8, AF = 0x576ed3f8428ebc4b;   // the arena's transforms
+    size_t ai = 0;
+    while (ai < t.keys.size() && !(t.keys[ai].first == AT && t.keys[ai].second == AF)) ai++;
+    if (ai == t.keys.size()) return false;
+    uint32_t wantSize = t.rows[map][ai].second;
+    MEMORY_BASIC_INFORMATION mi;
+    for (char* p = nullptr; VirtualQuery(p, &mi, sizeof mi) == sizeof mi; p = (char*)mi.BaseAddress + mi.RegionSize) {
+        if (mi.State != MEM_COMMIT || mi.Protect != PAGE_READWRITE || mi.RegionSize < 64) continue;
+        char* r0 = (char*)mi.BaseAddress;
+        char* r1 = r0 + mi.RegionSize;
+        for (char* q = r0; q + 32 <= r1; q += 8) {
+            U a, f;
+            memcpy(&a, q, 8);
+            if (a != AT) continue;
+            memcpy(&f, q + 8, 8);
+            if (f != AF) continue;
+            uint32_t frame, offset, size;
+            memcpy(&frame, q + 16, 4); memcpy(&offset, q + 20, 4); memcpy(&size, q + 24, 4);
+            if (offset != 0 || size != wantSize || frame < t.rows[map][ai].first) continue;
+            // the sorted rows round it, within this region
+            char* lo = q;
+            while (lo - 32 >= r0 && keyCmp(lo - 32, *(U*)lo, *(U*)(lo + 8)) < 0) lo -= 32;
+            char* hi = q + 32;
+            while (hi + 32 <= r1 && keyCmp(hi - 32, *(U*)hi, *(U*)(hi + 8)) < 0) hi += 32;
+            LiveRows l{lo, size_t(hi - lo) / 32, frame - t.rows[map][ai].first, map};
+            if (l.count < 1000) continue;
+            int checked = 0, good = 0;   // every row of this map must be there with its frame and size
+            for (size_t i = 0; i < t.keys.size(); i++) {
+                char* row = findRow(l, t.keys[i].first, t.keys[i].second);
+                checked++;
+                uint32_t fr, sz;
+                if (row) { memcpy(&fr, row + 16, 4); memcpy(&sz, row + 24, 4); }
+                if (row && fr == l.first + t.rows[map][i].first && sz == t.rows[map][i].second) good++;
+            }
+            logf("maps: rows in memory at %p: %zu rows, %d of %d of this map's rows match", (void*)lo, l.count, good, checked);
+            if (good == checked) { out = l; return true; }
+        }
+    }
+    return false;
+}
+
+// For the next match: the in-memory rows pointed at map k. -> true if done.
+bool switchMapInMemory(int k) {
+    MapsTable t;
+    if (!loadMapsTable(t) || k >= int(t.names.size()) || t.names[k] != MAP_ID[k]) { logf("maps: no usable maps.bin"); return false; }
+    std::lock_guard<std::mutex> lock(liveRowsMutex);
+    if (!liveRows.base) {
+        if (mapLoaded < 0) { logf("maps: the map this start is using isn't known"); return false; }
+        if (!findLiveRows(t, mapLoaded, liveRows)) { logf("maps: the manifest's rows weren't found in memory"); return false; }
+    }
+    for (size_t i = 0; i < t.keys.size(); i++) {
+        char* row = findRow(liveRows, t.keys[i].first, t.keys[i].second);
+        if (!row) continue;
+        uint32_t fr = liveRows.first + t.rows[k][i].first, off = 0, sz = t.rows[k][i].second;
+        memcpy(row + 16, &fr, 4); memcpy(row + 20, &off, 4); memcpy(row + 24, &sz, 4);
+    }
+    liveRows.map = k;
+    logf("maps: %s set in memory for the next match (%zu rows)", MAP_NAME[k], t.keys.size());
+    return true;
+}
+
+std::atomic<int> mapMemNow{-1};   // the map the in-memory rows point at, once switched
+
+std::string switchMap(int k) {
+    std::wstring m = manifestPath();
+    if (!mapsInstalled()) return "ARENA MAPS AREN'T INSTALLED";
+    mapShown();
+    int look = armsLookShown();
+    std::string live, oldHigh, oldLow;
+    readFile(m, live);
+    readFile(m + L".potato-high", oldHigh);
+    readFile(m + L".potato-low", oldLow);
+    std::vector<std::pair<std::wstring, std::string>> writes;
+    std::string newHigh, newLow, newLive;
+    for (const wchar_t* potato : {L"", L".potato-high", L".potato-low"}) {
+        std::wstring base = m + potato + mapSuffix(k);
+        std::string plain;
+        if (!readFile(base, plain)) continue;
+        for (int l = 0; l < int(HOLO_LOOKS); l++) {   // each arms look's copy, where it's set up
+            std::string data;
+            if (GetFileAttributesW((std::wstring(m) + potato + LOOK_SUFFIX[l]).c_str()) != INVALID_FILE_ATTRIBUTES &&
+                readFile(base + LOOK_SUFFIX[l], data))
+                writes.push_back({std::wstring(m) + potato + LOOK_SUFFIX[l], data});
+        }
+        std::string now;   // the plain one: in the arms look in use
+        if (!(look >= 0 && readFile(base + LOOK_SUFFIX[look], now))) now = plain;
+        if (std::wstring(potato) == L".potato-high") newHigh = now;
+        else if (std::wstring(potato) == L".potato-low") newLow = now;
+        else newLive = now;
+    }
+    if (newLive.empty()) return "THAT MAP ISN'T INSTALLED";
+    if (!newHigh.empty()) writes.push_back({m + L".potato-high", newHigh});
+    if (!newLow.empty()) writes.push_back({m + L".potato-low", newLow});
+    // the live manifest stays a copy of the potato one it was (so GRAPHICS LOW / HIGH keep working)
+    writes.push_back({m, !oldLow.empty() && live == oldLow && !newLow.empty() ? newLow
+                         : !oldHigh.empty() && live == oldHigh && !newHigh.empty() ? newHigh : newLive});
+    for (auto& [path, data] : writes)
+        if (!writeFile(path, data)) {
+            logf("maps: couldn't write %ls (error %lu)", path.c_str(), GetLastError());
+            return "COULDN'T SWITCH - SEE ECHOLAZYTABLET.LOG";
+        }
+    mapChosen = k;
+    WritePrivateProfileStringW(L"maps", L"map", mapSuffix(k).c_str() + 5, iniPath().c_str());
+    logf("maps: %s chosen for the next start", MAP_NAME[k]);
+    // and for the next match, if the rows in memory can be found (a few seconds' search the first time).
+    // OFF (12 Nov): the game crashed loading the next match after a switch in memory (the rows' content
+    // hashes aren't rewritten, among other suspects); maps change on the next start only.
+    constexpr bool SWITCH_IN_MEMORY = false;
+    if (SWITCH_IN_MEMORY && !mapMemBusy.exchange(true)) {
+        std::thread([k] {
+            if (switchMapInMemory(k)) mapMemNow = k;
+            mapMemBusy = false;
+        }).detach();
+        return std::string(MAP_NAME[k]) + " - SWITCHING...";
+    }
+    return std::string(MAP_NAME[k]) + " - ON AFTER A RESTART";
+}
+
+// ---- ARENA THEMES (MAPS page, THEMES >): echo-modding-tool's `themes` keeps each theme's files in a package of
+// its own, listed in <manifest>.themes; `use <name>` (plugins\EchoLazyTablet.themes.exe) points every manifest copy
+// at one, and the game reads it at its next start. <manifest>.theme names the one chosen.
+constexpr int MAX_THEMES = 8;
+std::mutex themesMutex;
+std::vector<std::string> themeNames;   // as listed, lower case (under themesMutex)
+std::string themeLoaded = "?";         // the theme this start is using ("" none; "?" not looked yet)
+std::string themeChosen;               // chosen since (under themesMutex)
+std::atomic<bool> themeBusy{false};
+std::string themeMessage;              // the last switch's result (under themesMutex)
+// ARENA WEATHER (15 Nov): the same for the weather (snow, rain...): <manifest>.weather lists the modes and
+// <manifest>.weather-mode says which this start uses; plugins\EchoLazyTablet.weather.exe (the themes tool under
+// that name) switches it. One switch at a time for both (themeBusy): both rewrite every manifest copy.
+std::vector<std::string> weatherNames;
+std::string weatherLoaded = "?", weatherChosen, weatherMessage;
+
+// ---- LIVE ARENA (MAPS page: THEMES > EFFECTS): the arena themes ship each glow material's emissive tint with
+// its three floats signed in their lowest byte (r ..a5, g ..5<class>, b ..6c; class 1 orange team, 2 blue team,
+// 3 strips; arena_themes\sign_theme.py), listed per theme in <manifest>.themes.live. In an arena match a thread
+// finds the loaded copies by those exact values (as the HOLO page finds the arms) and writes the effects into
+// them: LIVE THEMES (a tapped theme's glow colours at once; light and fog still at the next start), GOAL FLASH
+// (the arena flashes the scoring team's colour), DISC GLOW (the strips lean to the colour of the team holding
+// the disc), DISC SPEED (strips follow the disc's speed), RAINBOW STRIPS. Each one is a switch on the EFFECTS page, kept in the
+// ini [effects]. A copy is only written while the bytes around it are as found and it still holds what was last
+// written there; anything else is dropped, never written. Nothing is looked for or written while every effect
+// is off, outside arena matches, or when the theme in use has no signatures.
+namespace live {
+// (DISC SPEED: the strips' brightness follows the disc's speed, from dim at rest to 2.5x at 25 m/s; it asks the
+// API 4 times a second while on in an arena match, so it's off by default.
+// FINAL SECONDS: the last 30 s of play the strips go red, pulsing faster as time runs out (1 to 2.5 Hz; every pulse
+// here stays under 3 Hz, the photosensitivity limit for flashing), and slowly in
+// overtime, and the last 10 s tick on the wrist (tablet click; 3-2-1 its toggle sound); LEADER GLOW: the leading team's glows brighter, the other's dimmer; KICKOFF FLASH: a white burst
+// over the strips when play starts)
+// Page 2 (the EFFECTS page's MORE >): SHUFFLE: every new arena match takes a random theme's colours (glows and the
+// disc light, live; textures and lighting stay the loaded theme's); BREATHING: every glow breathes, slowly (6 s);
+// OVERTIME GOLD: the strips go gold in sudden death; POSSESSION GLOW: the team with the disc glows brighter, the
+// other dimmer; DANGER ZONE: with the disc within 10 m of a goal the strips pulse in the defending team's colour,
+// faster the closer it is, and that team's own glows throb too (which end is whose is learnt from the first goal
+// seen, [effects] orange_goal_z; white
+// until then); STORM: lightning now and then, a white double flicker over the strips every 5-15 s; TEAM TIDE: the
+// strips lean toward the team ahead, by its share of the points (3-1: 75% that team's colour); GOAL PARTY: after a
+// goal the strips run fast rainbow waves for 8 s, in the scoring team's colour at first.
+// Page 3: ARM COLOURS: the arena's team colours (each team's glows, the disc light when it holds the disc, and what
+// the other effects flash for that team) become the HOLO page's ORANGE TEAM / BLUE TEAM colours, live, rainbow
+// included: pick any team colours on the HOLO page. THEME CYCLE: the arena slowly fades from theme to theme (every
+// glow, the disc light and the screen grade; 12 s each, 4 s fades). DISC HEAT: the strips' colour follows the
+// disc's speed: cold blue at rest, white at half speed, red hot from 25 m/s (asks the API 4x a second, like DISC
+// SPEED). CLOCK COLOURS: over each round the strips drift from the theme's colour to amber to red as its clock runs.
+enum Effect { LIVE_THEMES, GOAL_FLASH, DISC_GLOW, DISC_SPEED, RAINBOW, FINAL_SECONDS, LEADER_GLOW, KICKOFF,
+              SHUFFLE, BREATHING, OVERTIME_GOLD, POSSESSION, DANGER_ZONE, STORM, TEAM_TIDE, GOAL_PARTY,
+              ARM_COLOURS, THEME_CYCLE, DISC_HEAT, CLOCK_COLOURS, EFFECTS };
+constexpr int EFFECTS_PER_PAGE = 8;
+constexpr int FIRST_PAGE = 3;   // (18 Nov) harry dropped pages 1 and 2: their effects stay off and have no buttons
+constexpr int FIRST_SHOWN = (FIRST_PAGE - 1) * EFFECTS_PER_PAGE;
+const char* const EFFECT_NAME[EFFECTS] = {"LIVE THEMES", "GOAL FLASH", "DISC GLOW", "DISC SPEED", "RAINBOW STRIPS", "FINAL SECONDS", "LEADER GLOW", "KICKOFF FLASH",
+                                          "SHUFFLE", "BREATHING", "OVERTIME GOLD", "POSSESSION GLOW", "DANGER ZONE", "STORM", "TEAM TIDE", "GOAL PARTY",
+                                          "ARM COLOURS", "THEME CYCLE", "DISC HEAT", "CLOCK COLOURS"};
+const wchar_t* const EFFECT_KEY[EFFECTS] = {L"live_themes", L"goal_flash", L"disc_glow", L"disc_speed", L"rainbow", L"final_seconds", L"leader_glow", L"kickoff",
+                                            L"shuffle", L"breathing", L"overtime_gold", L"possession", L"danger_zone", L"storm", L"team_tide", L"goal_party",
+                                            L"arm_colours", L"theme_cycle", L"disc_heat", L"clock_colours"};
+const bool EFFECT_DEFAULT[EFFECTS] = {true, true, true, false, false, true, false, true, false, false, true, false, false, false, false, false, false, false, false, false};
+std::atomic<bool> on[EFFECTS];
+
+enum State { IDLE, LOOKING, FOUND, NOT_FOUND, NO_SIGNATURES };
+std::atomic<int> state{IDLE};
+std::atomic<int> found{0};
+
+// The plugin's own copies of the signed values are kept bit-inverted (~), so the memory scan (which reads the
+// plugin's memory too) never finds them as if they were the game's.
+struct Tint {
+    int cls;
+    uint32_t inv[3];   // ~ the signed words
+};
+std::mutex lock;
+std::map<std::string, std::vector<Tint>> table;   // theme -> its signed tints (under lock)
+std::string preview;                              // a theme tapped while LIVE THEMES is on (under lock)
+
+struct Block {
+    uintptr_t at;           // the tint's three floats
+    int cls;
+    uint32_t origInv[3];    // ~ as found
+    uint8_t around[64];     // 32 bytes either side, as found
+    uint32_t lastInv[3];    // ~ what it holds now (as found, then as last written)
+};
+
+void load() {
+    for (int e = 0; e < EFFECTS; e++)
+        on[e] = e >= FIRST_SHOWN && GetPrivateProfileIntW(L"effects", EFFECT_KEY[e], EFFECT_DEFAULT[e], iniPath().c_str()) != 0;
+    std::string text, theme;
+    readFile(manifestPath() + L".themes.live", text);
+    std::map<std::string, std::vector<Tint>> t;
+    size_t at = 0;
+    while (at < text.size()) {
+        size_t end = text.find('\n', at);
+        std::string line = text.substr(at, end == std::string::npos ? std::string::npos : end - at);
+        Tint x{};
+        if (line.rfind("theme ", 0) == 0) theme = line.substr(6);
+        else if (!theme.empty() && sscanf(line.c_str(), "%d %x %x %x", &x.cls, &x.inv[0], &x.inv[1], &x.inv[2]) == 4 && x.cls >= 1 && x.cls <= 7) {
+            for (uint32_t& v : x.inv) v = ~v;
+            t[theme].push_back(x);
+        }
+        if (end == std::string::npos) break;
+        at = end + 1;
+    }
+    std::lock_guard<std::mutex> g(lock);
+    table = std::move(t);
+    std::string flags;
+    for (int e = 0; e < EFFECTS; e++) flags += on[e] ? '1' : '0';
+    logf("live: %zu themes with signatures; effects %s", table.size(), flags.c_str());
+}
+
+std::string toggle(int e) {
+    if (e < 0 || e >= EFFECTS) return "";
+    bool now = !on[e];
+    on[e] = now;
+    WritePrivateProfileStringW(L"effects", EFFECT_KEY[e], now ? L"1" : L"0", iniPath().c_str());
+    logf("live: %s %s", EFFECT_NAME[e], now ? "on" : "off");
+    return std::string(EFFECT_NAME[e]) + (now ? " ON" : " OFF");
+}
+
+void tapped(const std::string& theme) {   // a theme card was tapped
+    std::lock_guard<std::mutex> g(lock);
+    preview = theme;
+}
+
+float unsign(uint32_t w) {
+    float f;
+    memcpy(&f, &w, 4);
+    return f;
+}
+
+// One colour per class for `theme` (the first tint of each; classic has one per material, any is typical).
+// Classes 4-6 are the disc light's (orange holder, loose, blue holder: arena_themes\disc_light.py), in the themes
+// whose disc script is signed; without them they take the team and strip colours.
+bool classColours(const std::string& theme, float out[8][3]) {
+    std::lock_guard<std::mutex> g(lock);
+    auto it = table.find(theme);
+    if (it == table.end()) return false;
+    bool seen[8] = {};
+    for (auto& t : it->second)
+        if (!seen[t.cls]) {
+            seen[t.cls] = true;
+            for (int k = 0; k < 3; k++) out[t.cls][k] = unsign(~t.inv[k]);
+        }
+    for (int k = 0; k < 3; k++) {
+        if (!seen[4]) out[4][k] = out[1][k];
+        if (!seen[5]) out[5][k] = out[3][k];
+        if (!seen[6]) out[6][k] = out[2][k];
+    }
+    return seen[1] && seen[2] && seen[3];
+}
+
+// Every copy of `theme`'s signed tints in plain read-write memory.
+std::vector<Block> scan(const std::string& theme) {
+    std::vector<Tint> tints;
+    {
+        std::lock_guard<std::mutex> g(lock);
+        auto it = table.find(theme);
+        if (it != table.end()) tints = it->second;
+    }
+    std::vector<Block> out;
+    if (tints.empty()) return out;
+    MEMORY_BASIC_INFORMATION self{};      // (this thread's stack can hold the values it last read: skipped)
+    int here = 0;
+    VirtualQuery(&here, &self, sizeof self);
+    std::vector<uint8_t> buf(4 << 20);
+    uintptr_t bufLo = uintptr_t(buf.data()), bufHi = bufLo + buf.size();
+    MEMORY_BASIC_INFORMATION mbi;
+    for (uintptr_t at = 0x10000; VirtualQuery(reinterpret_cast<LPCVOID>(at), &mbi, sizeof mbi); at = uintptr_t(mbi.BaseAddress) + mbi.RegionSize) {
+        if (mbi.State != MEM_COMMIT || mbi.Type != MEM_PRIVATE || mbi.Protect != PAGE_READWRITE) continue;
+        uintptr_t start = uintptr_t(mbi.BaseAddress), end = start + mbi.RegionSize;
+        if (mbi.AllocationBase == self.AllocationBase) continue;
+        for (uintptr_t chunk = start; chunk < end; chunk += buf.size() - 16) {
+            size_t n = std::min<uintptr_t>(buf.size(), end - chunk);
+            if (n < 12 || !holo::readSelf(chunk, buf.data(), n)) break;
+            for (size_t i = 0; i + 12 <= n; i += 4) {
+                if (buf[i] != 0xa5 && buf[i] != 0xd1) continue;   // the red's signed low byte: cheap first test
+                if (chunk + i >= bufLo && chunk + i < bufHi) continue;   // (copies in the scan's own buffer)
+                uint32_t inv[3];
+                memcpy(inv, &buf[i], 12);
+                for (uint32_t& v : inv) v = ~v;
+                for (auto& t : tints) {
+                    if (memcmp(inv, t.inv, 12) != 0) continue;
+                    Block b{chunk + i, t.cls, {t.inv[0], t.inv[1], t.inv[2]}, {}, {t.inv[0], t.inv[1], t.inv[2]}};
+                    if (b.at < 0x10000 + 32 || !holo::readSelf(b.at - 32, b.around, 32) || !holo::readSelf(b.at + 12, b.around + 32, 32)) break;
+                    bool known = false;
+                    for (auto& o : out) known |= o.at == b.at;
+                    if (!known) out.push_back(b);
+                    break;
+                }
+            }
+            if (n < buf.size()) break;
+        }
+    }
+    return out;
+}
+
+// What Echo's API says about the match: arena or not, the score, and the team with the disc.
+struct Match {
+    bool arena = false;
+    int blue = -1, orange = -1;   // points
+    int holder = 0;               // 0 nobody, 1 orange team, 2 blue team (the classes' numbers)
+    double clock = -1;            // game_clock: seconds of play left
+    double discSpeed = 0;         // m/s
+    double discZ = 0;             // along the arena, toward one goal or the other
+    std::string session, status;  // game_status: pre_match, round_start, playing, score, sudden_death, ...
+};
+
+Match ask() {
+    static HINTERNET session = nullptr, connection = nullptr;
+    Match m;
+    if (!session) {
+        session = WinHttpOpen(L"EchoLazyTablet", WINHTTP_ACCESS_TYPE_NO_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+        if (!session) return m;
+        WinHttpSetTimeouts(session, 300, 300, 300, 500);
+        connection = WinHttpConnect(session, L"127.0.0.1", API_PORT, 0);
+    }
+    if (!connection) return m;
+    HINTERNET request = WinHttpOpenRequest(connection, L"GET", L"/session", nullptr, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, 0);
+    if (!request) return m;
+    DWORD status = 0, size = sizeof status;
+    if (!WinHttpSendRequest(request, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0, 0) || !WinHttpReceiveResponse(request, nullptr) ||
+        !WinHttpQueryHeaders(request, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_HEADER_NAME_BY_INDEX, &status, &size, WINHTTP_NO_HEADER_INDEX))
+        status = 0;
+    std::string body;
+    char buffer[4096];
+    DWORD read = 0;
+    while (status == 200 && WinHttpReadData(request, buffer, sizeof buffer, &read) && read) body.append(buffer, read);
+    WinHttpCloseHandle(request);
+    if (status != 200 || jsonString(body, "match_type").rfind("Echo_Arena", 0) != 0) return m;
+    m.arena = true;
+    m.session = jsonString(body, "sessionid");
+    m.blue = int(jsonNumber(body, "blue_points"));
+    m.orange = int(jsonNumber(body, "orange_points"));
+    m.clock = jsonNumber(body, "game_clock");
+    if (size_t d = body.find("\"disc\""); d != std::string::npos) {
+        size_t v = body.find("\"velocity\"", d), open = v == std::string::npos ? v : body.find('[', v);
+        if (open != std::string::npos && open - d < 400) {
+            const char* at = body.c_str() + open + 1;
+            double sum = 0;
+            for (int k = 0; k < 3; k++) {
+                char* end = nullptr;
+                double x = strtod(at, &end);
+                if (end == at) { sum = 0; break; }
+                sum += x * x;
+                at = end;
+                while (*at == ',' || isspace(static_cast<unsigned char>(*at))) at++;
+            }
+            m.discSpeed = std::sqrt(sum);
+        }
+        size_t q = body.find("\"position\"", d), open2 = q == std::string::npos ? q : body.find('[', q);
+        if (open2 != std::string::npos && open2 - d < 400) {
+            const char* at = body.c_str() + open2 + 1;
+            for (int k = 0; k < 3; k++) {
+                char* end = nullptr;
+                double x = strtod(at, &end);
+                if (end == at) break;
+                if (k == 2) m.discZ = x;
+                at = end;
+                while (*at == ',' || isspace(static_cast<unsigned char>(*at))) at++;
+            }
+        }
+    }
+    m.status = jsonString(body, "game_status");
+    // each team object: its "team" name and whether any of its players has "possession": true
+    size_t teams = body.find("\"teams\"");
+    size_t i = teams == std::string::npos ? std::string::npos : body.find('[', teams);
+    while (i != std::string::npos && i < body.size()) {
+        size_t open = body.find('{', i), close = open;
+        if (open == std::string::npos) break;
+        int depth = 0;
+        bool quoted = false;
+        for (; close < body.size(); close++) {
+            char ch = body[close];
+            if (quoted) { if (ch == '\\') close++; else if (ch == '"') quoted = false; }
+            else if (ch == '"') quoted = true;
+            else if (ch == '{') depth++;
+            else if (ch == '}' && --depth == 0) break;
+        }
+        std::string team = body.substr(open, close - open + 1);
+        bool has = false;
+        for (size_t k = team.find("\"possession\""); k != std::string::npos && !has; k = team.find("\"possession\"", k + 1)) {
+            size_t v = team.find_first_not_of(" \t\r\n:", k + 12);
+            has = v != std::string::npos && team.compare(v, 4, "true") == 0;
+        }
+        if (has) {
+            std::string name;
+            for (size_t k = team.find("\"team\""); k != std::string::npos; k = team.find("\"team\"", k + 1))
+                if (std::string v = jsonString(team.substr(k), "team"); !v.empty()) { name = v; break; }
+            if (name.find("ORANGE") != std::string::npos) m.holder = 1;
+            else if (name.find("BLUE") != std::string::npos) m.holder = 2;
+        }
+        i = close + 1;
+        size_t next = body.find_first_not_of(" \t\r\n,", i);
+        if (next == std::string::npos || body[next] != '{') break;
+    }
+    return m;
+}
+
+DWORD WINAPI watch(LPVOID) {
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);   // its scans and writes yield to Echo's own threads
+    registerBackground("live colours");
+    std::vector<Block> blocks;
+    Match match;
+    U askedAt = 0, arenaSince = 0, scannedAt = 0, flashUntil = 0, kickoffUntil = 0, clockAt = 0;
+    int lastTick = 99;      // FINAL SECONDS' countdown ticks: the whole second last ticked
+    std::string shuffled;   // SHUFFLE's theme for this match
+    U boltAt = 0;           // STORM's next lightning
+    U partyFrom = 0;        // GOAL PARTY: from when (it runs 8 s)
+    int partyTeam = 0;
+    double roundLength = 0;   // CLOCK COLOURS: the longest clock seen this match (its rounds' length)
+    // DANGER ZONE: the orange team's goal's z (its sign says which end; 0 not learnt yet)
+    double orangeGoalZ = double(int(GetPrivateProfileIntW(L"effects", L"orange_goal_z", 0, iniPath().c_str())));
+    srand(unsigned(GetTickCount64()));
+    float speedShown = 0;   // DISC SPEED, eased toward the API's (asked 4x a second, drawn 30x)
+    int scans = 0, flashTeam = 0;
+    std::string scannedSession;
+    for (;;) {
+        bool any = false, animating = false;
+        for (int e = 0; e < EFFECTS; e++) any |= on[e].load();
+        U now = GetTickCount64();
+        bool final = match.arena && on[FINAL_SECONDS] &&
+                     ((match.status == "playing" && match.clock > 0 && match.clock <= 30) || match.status == "sudden_death");
+        animating = now < flashUntil || now < kickoffUntil || now < partyFrom + 8000 ||
+                    (match.arena && !blocks.empty() && (on[DISC_SPEED] || on[RAINBOW] || final || on[BREATHING] || on[DANGER_ZONE] ||
+                                                        on[STORM] || on[ARM_COLOURS] || on[THEME_CYCLE] || on[DISC_HEAT] ||
+                                                        (on[OVERTIME_GOLD] && match.status == "sudden_death"))) ||
+                    (final && match.status == "playing" && match.clock <= 11);
+        Sleep(animating ? 33 : 250);
+        now = GetTickCount64();
+        std::string loaded;
+        {
+            std::lock_guard<std::mutex> g(themesMutex);
+            loaded = themeLoaded;
+        }
+        // (with every effect off, the copies still get their colours back once, then nothing more is done)
+        if ((!any && blocks.empty()) || loaded == "?" || loaded.empty()) { state = IDLE; continue; }
+        {
+            std::lock_guard<std::mutex> g(lock);
+            if (!table.count(loaded)) { state = NO_SIGNATURES; continue; }   // (no API asks either)
+        }
+        // Echo's API: every second in an arena match, every 3 s elsewhere (each ask costs the game a little)
+        if (now - askedAt >= (match.arena ? ((on[DISC_SPEED] || on[DANGER_ZONE] || on[DISC_HEAT]) && !blocks.empty() ? 250u : 1000u) : 3000u)) {
+            askedAt = now;
+            Match m = ask();
+            if (m.arena && (!match.arena || m.session != match.session)) {
+                arenaSince = now, scans = 0, shuffled.clear(), roundLength = 0;
+                std::lock_guard<std::mutex> g(lock);
+                if (on[SHUFFLE] && table.size() > 1) {
+                    std::vector<std::string> others;
+                    for (auto& [name, tints] : table) if (name != loaded) others.push_back(name);
+                    if (!others.empty()) shuffled = others[size_t(rand()) % others.size()];
+                    logf("live: SHUFFLE takes %s for this match", shuffled.c_str());
+                }
+            }
+            if (m.arena && match.arena && m.session == match.session && on[GOAL_FLASH]) {
+                int scored = match.blue >= 0 && m.blue > match.blue ? 2 : match.orange >= 0 && m.orange > match.orange ? 1 : 0;
+                if (scored) {
+                    flashTeam = scored, flashUntil = now + 3000;
+                    logf("live: goal, %s team", scored == 1 ? "orange" : "blue");
+                }
+            }
+            if (m.arena && match.arena && m.session == match.session) {   // learn which end is whose, from where the disc went in
+                int scored = match.blue >= 0 && m.blue > match.blue ? 2 : match.orange >= 0 && m.orange > match.orange ? 1 : 0;
+                if (scored && on[GOAL_PARTY]) partyFrom = now + (on[GOAL_FLASH] ? 3000 : 0), partyTeam = scored;   // after the flash
+                if (scored && std::fabs(match.discZ) > 15) {
+                    double z = scored == 2 ? match.discZ : -match.discZ;   // blue scored: it went into orange's goal
+                    if (!orangeGoalZ || (orangeGoalZ > 0) != (z > 0)) {
+                        orangeGoalZ = z > 0 ? 36 : -36;
+                        WritePrivateProfileStringW(L"effects", L"orange_goal_z", orangeGoalZ > 0 ? L"36" : L"-36", iniPath().c_str());
+                        logf("live: DANGER ZONE learnt the orange goal is at z %+.0f (disc at %.1f)", orangeGoalZ, match.discZ);
+                    }
+                }
+            }
+            if (m.arena && match.arena && m.session == match.session && on[KICKOFF] && m.status == "playing" &&
+                (match.status == "round_start" || match.status == "pre_match" || match.status == "score"))
+                kickoffUntil = now + 1500;
+            if (!m.arena && !blocks.empty()) { blocks.clear(); logf("live: left the arena"); }
+            match = m, clockAt = now;
+            if (m.arena && m.clock > roundLength) roundLength = m.clock;
+            soundLogArena = m.arena;
+        }
+        if (!match.arena) { state = IDLE; found = 0; continue; }
+        // FINAL SECONDS also ticks the last 10 seconds on the wrist: the tablet's click, its toggle sound for 3-2-1
+        // (the API's clock is a second old at most; counted on from when it was asked)
+        if (on[FINAL_SECONDS] && postEventOriginal && match.status == "playing" && match.clock > 0) {
+            int sec = int(std::ceil(match.clock - double(now - clockAt) / 1000));
+            if (sec >= 1 && sec <= 10 && sec < lastTick) playSound(sec <= 3 ? SOUND_TOGGLE_ON : SOUND_CLICK);
+            lastTick = sec;
+        } else lastTick = 99;
+        // look a few seconds after the arena loads, then again now and then while nothing's found (4 tries a match)
+        if (any && blocks.empty() && scans < 4 && now - arenaSince > 5000 && now - scannedAt > 15000) {
+            state = LOOKING;
+            U begin = GetTickCount64();
+            blocks = scan(loaded);
+            scannedAt = GetTickCount64();
+            scans++;
+            logf("live: scan took %llu ms, %zu glow copies (%s)", scannedAt - begin, blocks.size(), loaded.c_str());
+        }
+        found = int(blocks.size());
+        state = blocks.empty() ? (scans >= 4 ? NOT_FOUND : LOOKING) : FOUND;
+        if (blocks.empty()) continue;
+        // the colours wanted: per class, from the tapped theme (LIVE THEMES) or the one loaded
+        std::string want;
+        {
+            std::lock_guard<std::mutex> g(lock);
+            want = on[LIVE_THEMES] && !preview.empty() && table.count(preview) ? preview
+                 : on[SHUFFLE] && !shuffled.empty() && table.count(shuffled) ? shuffled : loaded;
+        }
+        float base[8][3] = {}, team[8][3] = {};
+        // STORM: a bolt is two flashes, 0-120 ms and 200-300 ms after it strikes
+        float bolt = 0;
+        if (on[STORM]) {
+            if (!boltAt || now > boltAt + 400) boltAt = now + 5000 + U(rand()) % 10000;
+            if (now >= boltAt) {
+                U in = now - boltAt;
+                bolt = in < 120 ? 4.f : in >= 200 && in < 300 ? 2.5f : 0.f;
+            }
+        }
+        bool fromTheme = want != loaded && classColours(want, base);
+        if (!classColours(want, team)) classColours(loaded, team);
+        double t = double(qpcNs()) / 1e9;
+        // THEME CYCLE: this moment's blend of two themes' colours (12 s a theme, the last 4 s fading to the next)
+        float cyc[8][3] = {};
+        bool cycOn = false;
+        if (on[THEME_CYCLE]) {
+            std::vector<std::string> names;
+            {
+                std::lock_guard<std::mutex> g(lock);
+                for (auto& [name, tints] : table) names.push_back(name);
+            }
+            if (names.size() > 1) {
+                double at = std::fmod(t / 12.0, double(names.size()));
+                size_t i = size_t(at);
+                float f = float(std::max(0.0, (at - double(i)) * 12.0 - 8.0) / 4.0);   // 0 until 8 s, then -> 1
+                f = f * f * (3 - 2 * f);
+                float a[8][3] = {}, b[8][3] = {};
+                if (classColours(names[i], a) && classColours(names[(i + 1) % names.size()], b)) {
+                    cycOn = true;
+                    for (int cl = 1; cl < 8; cl++)
+                        for (int k = 0; k < 3; k++) {
+                            float x = a[cl][k], y = b[cl][k];
+                            if (cl == 7 && (a[7][0] + a[7][1] + a[7][2] == 0 || b[7][0] + b[7][1] + b[7][2] == 0)) x = y = 0;   // (no grade: as found)
+                            cyc[cl][k] = x + (y - x) * f;
+                        }
+                    for (int cl = 1; cl < 7; cl++)
+                        for (int k = 0; k < 3; k++) team[cl][k] = cyc[cl][k];
+                }
+            }
+        }
+        // ARM COLOURS: the HOLO page's team colours (rainbow included) for the team classes
+        float arm[8][3] = {};
+        bool armOn = on[ARM_COLOURS];
+        if (armOn) {
+            std::lock_guard<std::mutex> g(holo::lock);
+            for (int side = 0; side < 2; side++) {   // class 1 orange team <- ORANGE bar, class 2 blue team <- BLUE bar
+                const holo::Setting& st = holo::settings[side == 0 ? holo::ORANGE : holo::BLUE];
+                float rgb[3];
+                if (st.rainbow) holo::hsv(float(std::fmod(t * holo::SPEEDS[holo::speed] + side * 180, 360.0)), 1, 1, rgb);
+                else for (int k = 0; k < 3; k++) rgb[k] = float(st.rgb[k]) / 255.f;
+                for (int cls : {side == 0 ? 1 : 2, side == 0 ? 4 : 6})
+                    for (int k = 0; k < 3; k++) arm[cls][k] = team[cls][k] = rgb[k];
+            }
+        }
+        speedShown += (float(match.discSpeed) - speedShown) * (animating ? .2f : 1.f);
+        for (auto it = blocks.begin(); it != blocks.end();) {
+            // one read: 32 bytes before the tint, the tint, 32 after (was three reads; this runs 30x a second per copy)
+            uint8_t span[76];
+            uint32_t cur[3];
+            bool same = holo::readSelf(it->at - 32, span, 76) && memcmp(span, it->around, 32) == 0 && memcmp(span + 44, it->around + 32, 32) == 0;
+            memcpy(cur, span + 32, 12);
+            for (int k = 0; same && k < 3; k++) same = cur[k] == ~it->lastInv[k];
+            SecureZeroMemory(span, sizeof span);   // (no copy of the signed tint left about for a scan to find)
+            cur[0] = cur[1] = cur[2] = 0;
+            if (!same) { it = blocks.erase(it); continue; }
+            float c[3];
+            // (a theme without a grade line leaves base[7] at 0: the grade stays as found then, never black)
+            bool useBase = fromTheme && base[it->cls][0] + base[it->cls][1] + base[it->cls][2] > 0;
+            for (int k = 0; k < 3; k++) c[k] = useBase ? base[it->cls][k] : unsign(~it->origInv[k]);
+            if (cycOn && cyc[it->cls][0] + cyc[it->cls][1] + cyc[it->cls][2] > 0)
+                for (int k = 0; k < 3; k++) c[k] = cyc[it->cls][k];
+            if (armOn && (it->cls == 1 || it->cls == 2 || it->cls == 4 || it->cls == 6))
+                for (int k = 0; k < 3; k++) c[k] = arm[it->cls][k];
+            if (any && it->cls == 7) {
+                // SCREEN GRADE (class 7): the arena's colour grade, i.e. the whole view. Only gentle multipliers, from
+                // the effects that are on: lightning brightens it, final seconds pull it red, overtime warms it, a
+                // goal or the danger zone tint it toward a team, kickoff and the goal party lift it.
+                float m[3] = {1, 1, 1};
+                auto toward = [&](const float* col, float amount) {
+                    float top = std::max({col[0], col[1], col[2], 1e-3f});
+                    for (int k = 0; k < 3; k++) m[k] *= 1 - amount + amount * col[k] / top;
+                };
+                if (final && match.status == "playing") {   // (the whole view: never faster than 1.5 Hz, unlike the strips)
+                    double hz = .8 + .7 * (30 - match.clock) / 30;
+                    float sn = float(.5 + .5 * std::sin(t * 2 * 3.14159265 * hz));
+                    m[1] *= 1 - .14f * sn, m[2] *= 1 - .14f * sn;
+                }
+                if (on[OVERTIME_GOLD] && match.status == "sudden_death") m[0] *= 1.04f, m[1] *= .97f, m[2] *= .82f;
+                if (on[DANGER_ZONE] && match.status == "playing" && std::fabs(match.discZ) > 26 && orangeGoalZ) {
+                    int defender = (orangeGoalZ > 0) == (match.discZ > 0) ? 1 : 2;
+                    toward(team[defender], .18f * float(std::min(1.0, (std::fabs(match.discZ) - 26) / 10)));
+                }
+                if (now < flashUntil && on[GOAL_FLASH]) toward(team[flashTeam], .3f * float(flashUntil - now) / 3000.f);
+                if (on[GOAL_PARTY] && now >= partyFrom && now < partyFrom + 8000) {
+                    float rgb[3];
+                    holo::hsv(float(std::fmod(t * 220, 360.0)), 1, 1, rgb);
+                    toward(rgb, .15f * (1 - float(now - partyFrom) / 8000.f));
+                }
+                if (now < kickoffUntil && on[KICKOFF]) for (float& v : m) v *= 1 + .25f * float(kickoffUntil - now) / 1500.f;
+                if (bolt > 0) for (int k = 0; k < 3; k++) m[k] *= 1 + bolt * (k == 2 ? .1f : .09f);   // a soft blue-white flash (two, then 5-15 s of nothing)
+                for (int k = 0; k < 3; k++) c[k] *= m[k];
+            } else if (any) {
+                if (it->cls == 3 && on[DISC_GLOW] && match.holder)
+                    for (int k = 0; k < 3; k++) c[k] = c[k] * .4f + team[match.holder][k] * .6f;
+                if (it->cls == 3 && on[CLOCK_COLOURS] && match.status == "playing" && roundLength > 30 && match.clock >= 0) {
+                    float f = float(std::min(1.0, std::max(0.0, 1 - match.clock / roundLength)));
+                    const float amber[3] = {1.f, .55f, .08f}, red[3] = {1.f, .08f, .03f};
+                    float v = std::max({c[0], c[1], c[2], .6f});
+                    for (int k = 0; k < 3; k++) {
+                        float to = f < .6f ? amber[k] * v : (amber[k] + (red[k] - amber[k]) * (f - .6f) / .4f) * v;
+                        float mix = std::min(1.f, f / .6f);
+                        c[k] = c[k] + (to - c[k]) * mix;
+                    }
+                }
+                if (it->cls == 3 && on[DISC_HEAT] && match.status == "playing") {
+                    float f = std::min(1.f, speedShown / 25.f);
+                    const float cold[3] = {.1f, .35f, 1.f}, white[3] = {1.f, 1.f, 1.f}, hot[3] = {1.f, .22f, .02f};
+                    float lvl = .6f + 1.2f * f;
+                    for (int k = 0; k < 3; k++)
+                        c[k] = (f < .5f ? cold[k] + (white[k] - cold[k]) * f * 2 : white[k] + (hot[k] - white[k]) * (f - .5f) * 2) * lvl;
+                }
+                if (it->cls >= 3 && it->cls <= 6 && on[RAINBOW]) {   // strips and the disc
+                    float v = std::max({c[0], c[1], c[2], .5f}), rgb[3];
+                    holo::hsv(float(std::fmod(t * 40 + it->at / 64 % 360, 360.0)), 1, v, rgb);
+                    for (int k = 0; k < 3; k++) c[k] = rgb[k];
+                }
+                if (it->cls == 3 && on[TEAM_TIDE] && match.blue + match.orange > 0 && match.blue >= 0 && match.orange >= 0) {
+                    int ahead = match.blue > match.orange ? 2 : 1;
+                    float share = float(ahead == 2 ? match.blue : match.orange) / float(match.blue + match.orange);   // .5 to 1
+                    float lean = (share - .5f) * 2.f;
+                    float top = std::max({team[ahead][0], team[ahead][1], team[ahead][2], 1e-3f});
+                    float v = std::max({c[0], c[1], c[2], .5f});
+                    if (match.blue != match.orange)
+                        for (int k = 0; k < 3; k++) c[k] = c[k] * (1 - lean) + team[ahead][k] / top * v * lean;
+                }
+                if (on[POSSESSION] && it->cls <= 2 && match.holder)
+                    for (float& v : c) v *= it->cls == match.holder ? 1.5f : .7f;
+                if (on[LEADER_GLOW] && it->cls <= 2 && match.blue >= 0 && match.orange >= 0 && match.blue != match.orange) {
+                    int leader = match.blue > match.orange ? 2 : 1;
+                    for (float& v : c) v *= it->cls == leader ? 1.6f : .6f;
+                }
+                if (it->cls == 3 && final) {   // red, pulsing 1 Hz at 30 s up to 4 Hz at the end; slow in overtime
+                    double hz = match.status == "sudden_death" ? .6 : 1 + 1.5 * (30 - match.clock) / 30;   // (2.5 Hz at most: flashing in VR)
+                    float s = float(.6 + 1.0 * (.5 + .5 * std::sin(t * 2 * 3.14159265 * hz)));
+                    c[0] = 1.f * s, c[1] = .05f * s, c[2] = .02f * s;
+                }
+                if (it->cls == 3 && on[OVERTIME_GOLD] && match.status == "sudden_death") {
+                    float s = float(1.4 + .4 * std::sin(t * 2 * 3.14159265 * .5));
+                    c[0] = 1.f * s, c[1] = .62f * s, c[2] = .12f * s;
+                }
+                if (it->cls == 3 && on[DANGER_ZONE] && match.status == "playing") {
+                    double closeness = std::fabs(match.discZ) - 26;   // 0 at 10 m from a goal (goals at about +-36)
+                    if (closeness > 0) {
+                        int defender = !orangeGoalZ ? 0 : (orangeGoalZ > 0) == (match.discZ > 0) ? 1 : 2;
+                        float in = float(std::min(1.0, closeness / 10)), d[3] = {1, 1, 1};
+                        if (defender) for (int k = 0; k < 3; k++) d[k] = team[defender][k];
+                        float top = std::max({d[0], d[1], d[2], 1e-3f});
+                        float s = float((.5 + .5 * std::sin(t * 2 * 3.14159265 * (1.5 + 1 * in))) * (1 + 2 * in));   // (2.5 Hz at most)
+                        for (int k = 0; k < 3; k++) c[k] = c[k] * (1 - in * .8f) + d[k] / top * s;
+                    }
+                }
+                if (it->cls <= 2 && on[DANGER_ZONE] && match.status == "playing" && orangeGoalZ) {
+                    // the defending team's own glows (around their goal and tube) throb with the strips
+                    double closeness = std::fabs(match.discZ) - 26;
+                    int defender = (orangeGoalZ > 0) == (match.discZ > 0) ? 1 : 2;
+                    if (closeness > 0 && it->cls == defender) {
+                        float in = float(std::min(1.0, closeness / 10));
+                        float s = float(.5 + .5 * std::sin(t * 2 * 3.14159265 * (1.5 + 1 * in)));   // (2.5 Hz at most)
+                        for (float& v : c) v *= 1 + in * (.4f + .8f * s);
+                    }
+                }
+                if (on[BREATHING] && it->cls <= 3) {
+                    float s = float(.7 + .3 * std::sin(t * 2 * 3.14159265 / 6));
+                    for (float& v : c) v *= s;
+                }
+                if (it->cls == 3 && on[GOAL_PARTY] && now >= partyFrom && now < partyFrom + 8000) {
+                    float in = float(now - partyFrom) / 8000.f;           // 0 -> 1 over the party
+                    float rgb[3], hue = float(std::fmod(t * 220 + double(it->at / 64 % 97) * 11, 360.0));
+                    holo::hsv(hue, 1, 2.2f * (1 - .6f * in), rgb);
+                    float top = std::max({team[partyTeam][0], team[partyTeam][1], team[partyTeam][2], 1e-3f});
+                    float mix = std::max(0.f, 1 - in * 4);                 // the scorers' colour for the first 2 s
+                    for (int k = 0; k < 3; k++) c[k] = rgb[k] * (1 - mix) + team[partyTeam][k] / top * 2.2f * mix;
+                }
+                if (it->cls == 3 && bolt > 0)
+                    for (int k = 0; k < 3; k++) c[k] = std::max(c[k], bolt * (k == 2 ? 1.f : .9f));   // a little blue-white
+                if (it->cls == 3 && now < kickoffUntil && on[KICKOFF]) {
+                    float s = 3.f * float(kickoffUntil - now) / 1500.f;
+                    for (float& v : c) v = std::max(v, s);
+                }
+                if (it->cls == 3 && on[DISC_SPEED]) {
+                    float lvl = .45f + 2.05f * std::min(1.f, speedShown / 25.f);
+                    for (float& v : c) v *= lvl;
+                }
+                if (now < flashUntil && on[GOAL_FLASH]) {
+                    float s = float(1.5 + 1.5 * (.5 + .5 * std::cos(t * 2 * 3.14159265 * 2.5)));   // (2.5 Hz at most)
+                    for (int k = 0; k < 3; k++) c[k] = team[flashTeam][k] * s;
+                }
+            }
+            uint32_t w[3];
+            memcpy(w, c, 12);
+            if (w[0] != ~it->lastInv[0] || w[1] != ~it->lastInv[1] || w[2] != ~it->lastInv[2]) {
+                SIZE_T wrote = 0;
+                if (WriteProcessMemory(GetCurrentProcess(), reinterpret_cast<LPVOID>(it->at), w, 12, &wrote) && wrote == 12)
+                    for (int k = 0; k < 3; k++) it->lastInv[k] = ~w[k];
+                else { it = blocks.erase(it); continue; }
+            }
+            w[0] = w[1] = w[2] = 0;
+            ++it;
+        }
+        if (!any) {   // every effect switched off: the colours are back as loaded, so let go
+            bool back = true;
+            for (auto& b : blocks) back &= memcmp(b.lastInv, b.origInv, 12) == 0;
+            if (back) blocks.clear();
+        }
+    }
+}
+}  // namespace live
+
+
+void loadThemes() {
+    std::string list, now;
+    readFile(manifestPath() + L".themes", list);
+    std::vector<std::string> names;
+    size_t at = 0;
+    while (at < list.size()) {
+        size_t end = list.find('\n', at);
+        std::string line = list.substr(at, end == std::string::npos ? std::string::npos : end - at);
+        if (line.rfind("theme ", 0) == 0 && names.size() < size_t(MAX_THEMES)) names.push_back(line.substr(6));
+        if (end == std::string::npos) break;
+        at = end + 1;
+    }
+    std::lock_guard<std::mutex> lock(themesMutex);
+    themeNames = names;
+    if (themeLoaded == "?") {
+        readFile(manifestPath() + L".theme", now);
+        themeLoaded = now;
+        logf("themes: %zu listed, this start: %s", names.size(), now.empty() ? "(none)" : now.c_str());
+    }
+}
+
+void loadWeather() {
+    std::string list, now;
+    readFile(manifestPath() + L".weather", list);
+    std::vector<std::string> names;
+    size_t at = 0;
+    while (at < list.size()) {
+        size_t end = list.find('\n', at);
+        std::string line = list.substr(at, end == std::string::npos ? std::string::npos : end - at);
+        while (!line.empty() && (line.back() == '\r' || line.back() == ' ')) line.pop_back();
+        if (line.rfind("theme ", 0) == 0 && names.size() < size_t(MAX_THEMES)) names.push_back(line.substr(6));
+        if (end == std::string::npos) break;
+        at = end + 1;
+    }
+    std::lock_guard<std::mutex> lock(themesMutex);
+    weatherNames = names;
+    if (weatherLoaded == "?") {
+        readFile(manifestPath() + L".weather-mode", now);
+        while (!now.empty() && (now.back() == '\n' || now.back() == '\r' || now.back() == ' ')) now.pop_back();
+        weatherLoaded = now;
+        logf("weather: %zu listed, this start: %s", names.size(), now.empty() ? "(none)" : now.c_str());
+    }
+}
+
+std::string upper(std::string s) {
+    for (char& ch : s) ch = char(toupper(static_cast<unsigned char>(ch)));
+    return s;
+}
+
+std::string switchTool(const std::string& name, bool weather);
+std::string switchTheme(int k) {
+    std::string name;
+    {
+        std::lock_guard<std::mutex> lock(themesMutex);
+        if (k < 0 || k >= int(themeNames.size())) return "";
+        name = themeNames[k];
+    }
+    live::tapped(name);   // LIVE THEMES: its glow colours at once
+    return switchTool(name, false);
+}
+std::string switchWeather(int k) {
+    std::string name;
+    {
+        std::lock_guard<std::mutex> lock(themesMutex);
+        if (k < 0 || k >= int(weatherNames.size())) return "";
+        name = weatherNames[k];
+    }
+    return switchTool(name, true);
+}
+std::string switchTool(const std::string& name, bool weather) {
+    if (themeBusy.exchange(true)) return "STILL SWITCHING...";
+    std::thread([name, weather] {
+        std::wstring exe = dir + (weather ? L"\\EchoLazyTablet.weather.exe" : L"\\EchoLazyTablet.themes.exe");
+        std::wstring game = manifestPath();
+        for (int i = 0; i < 6; i++) game.resize(game.find_last_of(L"\\/"));   // file, manifests, win10, rad15, 5932408047, _data
+        std::wstring cmd = L"\"" + exe + L"\" use " + std::wstring(name.begin(), name.end());
+        std::wstring env = L"ECHO_DIR=" + game;   // the tool finds the game from ECHO_DIR
+        env.push_back(L'\0');
+        if (wchar_t* block = GetEnvironmentStringsW()) {
+            for (wchar_t* e = block; *e; e += wcslen(e) + 1)
+                if (_wcsnicmp(e, L"ECHO_DIR=", 9) != 0) { env += e; env.push_back(L'\0'); }
+            FreeEnvironmentStringsW(block);
+        }
+        env.push_back(L'\0');
+        STARTUPINFOW si{};
+        si.cb = sizeof si;
+        PROCESS_INFORMATION pi{};
+        std::string result;
+        // (it rewrites every manifest copy, ~330 MB, while Echo runs: below normal priority, and the tool puts itself
+        // in Windows' background mode for its disk work, so Echo's frames and streaming come first; it may take a
+        // minute or two)
+        if (CreateProcessW(exe.c_str(), cmd.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT | BELOW_NORMAL_PRIORITY_CLASS,
+                           env.data(), nullptr, &si, &pi)) {
+            DWORD code = 1;
+            if (WaitForSingleObject(pi.hProcess, 300000) == WAIT_OBJECT_0) GetExitCodeProcess(pi.hProcess, &code);
+            CloseHandle(pi.hProcess);
+            CloseHandle(pi.hThread);
+            result = code == 0 ? upper(name) + " - ON AFTER A RESTART" : weather ? "COULDN'T SWITCH THE WEATHER" : "COULDN'T SWITCH THE THEME";
+            logf("%s: %s %s (exit %lu)", weather ? "weather" : "themes", name.c_str(), code == 0 ? "chosen for the next start" : "failed", code);
+            if (code == 0) {
+                std::lock_guard<std::mutex> lock(themesMutex);
+                (weather ? weatherChosen : themeChosen) = name;
+            }
+        } else {
+            result = weather ? "WEATHER TOOL MISSING - REINSTALL" : "THEMES TOOL MISSING - REINSTALL";
+            logf("%s: can't run %ls (error %lu)", weather ? "weather" : "themes", exe.c_str(), GetLastError());
+        }
+        {
+            std::lock_guard<std::mutex> lock(themesMutex);
+            (weather ? weatherMessage : themeMessage) = result;
+        }
+        themeBusy = false;
+    }).detach();
+    return upper(name) + " - SWITCHING...";
 }
 
 int liveGraphics() {
@@ -3288,6 +4315,18 @@ void ensure(void* canvas, unsigned element, bool visible) {
     if (shown(canvas, element) != visible) show(canvas, element, visible);
 }
 
+// (15 Nov) The THEMES / WEATHER / EFFECTS cards' pictures (tablet.py: one hidden per theme, weather and effect on its
+// card's spot): kind 1 THEMES, 2 WEATHER (a card shows its picture only when the listed name is the one the picture is
+// of), 3 EFFECTS (the page's, from firstEffect); 0 hides them all (MAPS, the soundboard).
+void pagePictures(void* page, int kind, const std::vector<std::string>& names, unsigned firstEffect) {
+    for (unsigned k = 0; k < std::size(QUEUE_THEME_PICTURES); k++)
+        ensure(page, QUEUE_THEME_PICTURES[k], kind == 1 && k < names.size() && names[k] == QUEUE_THEME_PICTURE_IDS[k]);
+    for (unsigned k = 0; k < std::size(QUEUE_WEATHER_PICTURES); k++)
+        ensure(page, QUEUE_WEATHER_PICTURES[k], kind == 2 && k < names.size() && names[k] == QUEUE_WEATHER_PICTURE_IDS[k]);
+    for (unsigned k = 0; k < std::size(QUEUE_EFFECT_PICTURES); k++)
+        ensure(page, QUEUE_EFFECT_PICTURES[k], kind == 3 && k >= firstEffect && k < firstEffect + unsigned(SOUND_PADS));
+}
+
 void render(Context& c) {
     bool active = onOurPage(c) && !tabletFault;
     bool play = active && c.page == Page::Queue, sounds = active && c.page == Page::Sounds, holoPage = active && c.page == Page::Holo;
@@ -3332,14 +4371,17 @@ void render(Context& c) {
             ensure(overlay, i, sounds && !c.setup);
     }
     if (overlay && active) {   // the title strip: PLAY or SFX, or what's being set and the hotkey picked so far
-        std::string sub = sounds ? "SOUNDBOARD" : holoPage ? "HOLOGRAM ARM COLOURS" : "MATCHMAKING";
+        bool themesTab = sounds && (c.themes || c.effects || c.weather);   // (the THEMES tab shows on the MAPS page's canvas)
+        std::string sub = themesTab ? (c.weather ? std::string("ARENA WEATHER") : c.effects ? std::string("LIVE ARENA EFFECTS")
+                                                 : std::string("ARENA LIGHTING THEMES"))
+                        : sounds ? "ARENA MAPS" : holoPage ? "HOLOGRAM ARM COLOURS" : "MATCHMAKING";
         if (c.setup && now < c.pickFirstUntil) sub = c.pickMessage;
         else if (c.setup && c.naming) sub = c.name.empty() ? "TYPE A NAME, THEN SAVE" : "NAME: " + c.name;
         else if (c.setup && !c.ctrl && !c.shift && !c.alt && c.key.empty()) sub = c.setupSlot < 0 ? "PICK YOUR CLIP APP'S HOTKEY" : "PICK YOUR SOUND'S HOTKEY";
         else if (c.setup)
             sub = "HOTKEY: " + std::string(c.ctrl ? "CTRL + " : "") + (c.shift ? "SHIFT + " : "") + (c.alt ? "ALT + " : "") +
                   (c.key.empty() ? "..." : c.key);
-        std::string heading = !c.setup ? (sounds ? "SFX" : holoPage ? "HOLO" : "PLAY") : c.setupSlot < 0 ? "CLIP" : "SFX " + std::to_string(c.setupSlot + 1);
+        std::string heading = !c.setup ? (themesTab ? (c.weather ? "WEATHER" : c.effects ? "FX" : "THEMES") : sounds ? "MAPS" : holoPage ? "HOLO" : "PLAY") : c.setupSlot < 0 ? "CLIP" : "SFX " + std::to_string(c.setupSlot + 1);
         setText(overlay, QUEUE_PAGE_TITLE, c.titleText, heading);
         setText(overlay, QUEUE_PAGE_SUBTITLE, c.subtitleText, sub);
         if (c.setup) {   // while naming, the bottom row's keys type instead
@@ -3383,7 +4425,7 @@ void render(Context& c) {
     // Tab highlight: ours while our page is up, otherwise the stock ones (which the game's
     // own scripts keep pointing at the right stock tab). While ours is up, the game may
     // re-show its highlight; re-checked a few times a second, not every frame.
-    int nav = play ? 1 : sounds ? 2 : holoPage ? 3 : 0;
+    int nav = play ? 1 : sounds ? (c.themes || c.effects || c.weather ? 4 : 2) : holoPage ? 3 : 0;
     if (overlay && c.views[1].p && (c.navState != nav || (active && now - c.navCheckedAt > 250))) {
         c.navCheckedAt = now;
         ensure(overlay, QUEUE_PAGE_TAB_SELECTED, nav == 1);
@@ -3392,6 +4434,8 @@ void render(Context& c) {
         ensure(overlay, QUEUE_PAGE_SOUND_TAB_ICON, nav != 2);
         ensure(overlay, QUEUE_PAGE_HOLO_TAB_SELECTED, layout.holo && nav == 3);
         ensure(overlay, QUEUE_PAGE_HOLO_TAB_ICON, layout.holo && nav != 3);
+        ensure(overlay, QUEUE_PAGE_THEMES_TAB_SELECTED, layout.holo && nav == 4);
+        ensure(overlay, QUEUE_PAGE_THEMES_TAB_ICON, layout.holo && nav != 4);
         if (active) {
             for (auto i : layout.navStockSelected) ensure(c.views[1].p, i, false);
             for (auto i : layout.navOtherSelected) ensure(c.views[1].p, i, false);  // their own plugin shows them again
@@ -3401,11 +4445,135 @@ void render(Context& c) {
     }
     void* page = c.views[2].p;
     if (sounds && page) {
-        setText(page, QUEUE_PAGE_SOUND_STATUS, c.soundStatus, now < c.flashUntil ? c.flash : c.editing ? "TAP A SOUND TO SET ITS KEY" : "TAP A SOUND TO PRESS ITS KEY");
-        setText(page, QUEUE_PAGE_SOUND_EDIT_TEXT, c.soundEditText, c.editing ? "DONE" : "EDIT");
+        // (was the soundboard) ARENA MAPS: the first pads are the maps, the rest blank
+        if (c.effects) {
+            int st = live::state, n = live::found;
+            std::string status = now < c.flashUntil ? c.flash
+                               : st == live::FOUND ? "LIVE: " + std::to_string(n) + " ARENA GLOWS - TAP TO SWITCH"
+                               : st == live::LOOKING ? "LOOKING FOR THE ARENA GLOWS..."
+                               : st == live::NOT_FOUND ? "ARENA GLOWS NOT FOUND THIS MATCH"
+                               : st == live::NO_SIGNATURES ? "THIS THEME HAS NO LIVE COLOURS"
+                               : "EFFECTS WORK IN ARENA MATCHES - TAP TO SWITCH";
+            setText(page, QUEUE_PAGE_SOUND_STATUS, c.soundStatus, status);
+            bool lastPage = c.effects * live::EFFECTS_PER_PAGE >= live::EFFECTS;
+            setText(page, QUEUE_PAGE_SOUND_EDIT_TEXT, c.soundEditText, lastPage ? "WEATHER >" : "MORE >");
+            unsigned first = unsigned(c.effects - 1) * live::EFFECTS_PER_PAGE;
+            for (unsigned i = 0; i < SOUND_PADS; i++) {
+                unsigned e = first + i;
+                bool card = i < unsigned(MAPS), effect = i < unsigned(live::EFFECTS_PER_PAGE) && e < unsigned(live::EFFECTS);
+                if (card) ensure(page, QUEUE_MAP_PICTURES[i], false);
+                setText(page, QUEUE_SOUND_TEXTS[i], c.soundText[i], effect ? live::EFFECT_NAME[e] : "");
+                setText(page, QUEUE_SOUND_CAPTIONS[i], c.soundCaption[i], !effect ? "" : live::on[e] ? "ON" : "OFF");
+            }
+            pagePictures(page, 3, {}, first);
+        } else if (c.themes) {
+            static U themesReadAt = 0;
+            if (!themesReadAt || now - themesReadAt > 3000) { loadThemes(); themesReadAt = now; }
+            std::vector<std::string> names;
+            std::string loaded, chosen, message;
+            {
+                std::lock_guard<std::mutex> lock(themesMutex);
+                names = themeNames, loaded = themeLoaded, chosen = themeChosen, message = themeMessage;
+            }
+            std::string next = chosen.empty() ? loaded : chosen;
+            std::string status = themeBusy ? "SWITCHING THEME..."
+                               : now < c.flashUntil ? (message.empty() ? c.flash : message)
+                               : names.empty() ? "ARENA THEMES AREN'T INSTALLED"
+                               : next != loaded ? "NEXT START: " + upper(next) + " - RESTART ECHO TO SEE IT"
+                               : loaded.empty() ? "TAP A THEME" : "IN USE: " + upper(loaded) + " - TAP ONE TO CHANGE";
+            setText(page, QUEUE_PAGE_SOUND_STATUS, c.soundStatus, status);
+            setText(page, QUEUE_PAGE_SOUND_EDIT_TEXT, c.soundEditText, "EFFECTS >");
+            for (unsigned i = 0; i < SOUND_PADS; i++) {
+                bool card = i < unsigned(MAPS), theme = i < names.size();
+                if (card) ensure(page, QUEUE_MAP_PICTURES[i], false);
+                setText(page, QUEUE_SOUND_TEXTS[i], c.soundText[i], theme ? (names[i] == "classic" ? std::string("OFF (CLASSIC)") : upper(names[i])) : "");
+                setText(page, QUEUE_SOUND_CAPTIONS[i], c.soundCaption[i],
+                        !theme ? "" : names[i] == next && names[i] == loaded ? "IN USE" : names[i] == next ? "NEXT START" : names[i] == loaded ? "IN USE NOW" : "");
+            }
+            pagePictures(page, 1, names, 0);
+        } else if (c.weather) {
+            static U weatherReadAt = 0;
+            if (!weatherReadAt || now - weatherReadAt > 3000) { loadWeather(); weatherReadAt = now; }
+            std::vector<std::string> names;
+            std::string loaded, chosen, message;
+            {
+                std::lock_guard<std::mutex> lock(themesMutex);
+                names = weatherNames, loaded = weatherLoaded, chosen = weatherChosen, message = weatherMessage;
+            }
+            std::string next = chosen.empty() ? loaded : chosen;
+            std::string status = themeBusy ? "SWITCHING..."
+                               : now < c.flashUntil ? (message.empty() ? c.flash : message)
+                               : names.empty() ? "ARENA WEATHER ISN'T INSTALLED"
+                               : next != loaded ? "NEXT START: " + upper(next) + " - RESTART ECHO TO SEE IT"
+                               : loaded.empty() ? "TAP A WEATHER" : "WEATHER: " + upper(loaded) + " - TAP ONE TO CHANGE";
+            setText(page, QUEUE_PAGE_SOUND_STATUS, c.soundStatus, status);
+            setText(page, QUEUE_PAGE_SOUND_EDIT_TEXT, c.soundEditText, "< THEMES");
+            for (unsigned i = 0; i < SOUND_PADS; i++) {
+                bool card = i < unsigned(MAPS), w = i < names.size();
+                if (card) ensure(page, QUEUE_MAP_PICTURES[i], false);
+                setText(page, QUEUE_SOUND_TEXTS[i], c.soundText[i], w ? (names[i] == "clear" ? std::string("CLEAR (OFF)") : upper(names[i])) : "");
+                setText(page, QUEUE_SOUND_CAPTIONS[i], c.soundCaption[i],
+                        !w ? "" : names[i] == next && names[i] == loaded ? "IN USE" : names[i] == next ? "NEXT START" : names[i] == loaded ? "IN USE NOW" : "");
+            }
+            pagePictures(page, 2, names, 0);
+        } else {
+        for (unsigned i = 0; i < unsigned(MAPS) && i < SOUND_PADS; i++) ensure(page, QUEUE_MAP_PICTURES[i], true);
+        pagePictures(page, 0, {}, 0);
+        int shown = mapsInstalled() ? mapShown() : -1;
+        int mem = mapMemNow;
+        std::string status = now < c.flashUntil && !(mem >= 0 && mapChosen == mem && !mapMemBusy) ? c.flash
+                           : !mapsInstalled() ? "ARENA MAPS AREN'T INSTALLED"
+                           : mapMemBusy ? "SWITCHING..."
+                           : mem >= 0 ? "NEXT MATCH: " + std::string(MAP_NAME[mem])
+                           : mapLoaded >= 0 && shown == mapLoaded ? "IN USE: " + std::string(MAP_NAME[mapLoaded]) + " - TAP ONE TO CHANGE"
+                           : shown >= 0 ? "NEXT START: " + std::string(MAP_NAME[shown]) : "TAP A MAP";
+        setText(page, QUEUE_PAGE_SOUND_STATUS, c.soundStatus, status);
+        setText(page, QUEUE_PAGE_SOUND_EDIT_TEXT, c.soundEditText, "THEMES >");
         for (unsigned i = 0; i < SOUND_PADS; i++) {
-            setText(page, QUEUE_SOUND_TEXTS[i], c.soundText[i], soundLabels[i]);
-            setText(page, QUEUE_SOUND_CAPTIONS[i], c.soundCaption[i], soundNames[i]);
+            bool map = i < unsigned(MAPS);
+            setText(page, QUEUE_SOUND_TEXTS[i], c.soundText[i], map ? MAP_NAME[i] : "");
+            setText(page, QUEUE_SOUND_CAPTIONS[i], c.soundCaption[i],
+                    !map ? "" : mem >= 0 ? (int(i) == mem ? "NEXT MATCH" : "") : int(i) == shown && int(i) == mapLoaded ? "IN USE" : int(i) == shown ? "NEXT START" : int(i) == mapLoaded ? "IN USE NOW" : "");
+        }
+        }
+        // Card colours (+0x78 of each name and caption, as the HOLO page tints its preview): THEMES names in each
+        // theme's orange-team colour, EFFECTS captions green ON / red OFF, MAPS as built.
+        {
+            P rows = at<P>(page, 0x90);
+            auto colourOf = [&](unsigned element) { return reinterpret_cast<float*>(rows + element * 224 + 0x78); };
+            if (c.cardOrig.empty())
+                for (unsigned i = 0; i < SOUND_PADS; i++)
+                    for (unsigned e : {QUEUE_SOUND_TEXTS[i], QUEUE_SOUND_CAPTIONS[i]}) c.cardOrig.insert(c.cardOrig.end(), colourOf(e), colourOf(e) + 3);
+            std::vector<float> want = c.cardOrig;
+            std::vector<std::string> names;
+            if (c.themes) {
+                std::lock_guard<std::mutex> lock(themesMutex);
+                names = themeNames;
+            }
+            for (unsigned i = 0; i < SOUND_PADS; i++) {
+                float* name = &want[i * 6], *caption = &want[i * 6 + 3];
+                float cc[8][3];
+                if (c.themes && i < names.size() && names[i] != "classic" && live::classColours(names[i], cc)) {
+                    float top = std::max({cc[1][0], cc[1][1], cc[1][2], 1e-3f});
+                    for (int k = 0; k < 3; k++) name[k] = .2f + .8f * cc[1][k] / top;   // full bright, a little white for reading
+                } else if (unsigned e = unsigned(std::max(c.effects - 1, 0)) * live::EFFECTS_PER_PAGE + i;
+                           c.effects && i < unsigned(live::EFFECTS_PER_PAGE) && e < unsigned(live::EFFECTS)) {
+                    const float onColour[3] = {.35f, 1.f, .5f}, offColour[3] = {1.f, .4f, .35f};
+                    for (int k = 0; k < 3; k++) caption[k] = live::on[e] ? onColour[k] : offColour[k];
+                }
+            }
+            if (want != c.cardTints) {
+                for (unsigned i = 0; i < SOUND_PADS; i++) {
+                    unsigned els[2] = {QUEUE_SOUND_TEXTS[i], QUEUE_SOUND_CAPTIONS[i]};
+                    for (int j = 0; j < 2; j++) {
+                        float* to = colourOf(els[j]);
+                        for (int k = 0; k < 3; k++) to[k] = want[i * 6 + j * 3 + k];
+                        show(page, els[j], false);   // (hidden and shown again so the tablet redraws it)
+                        show(page, els[j], true);
+                    }
+                }
+                c.cardTints = want;
+            }
         }
     }
     if (holoPage && page && !c.setup) {
@@ -3566,7 +4734,7 @@ void gate(Context& c, void* cs) {
         bool hide;
         if (tabletFault) hide = isOurs(b.name);                 // stock buttons back to normal
         else if (b.name == QUEUE_TAB || b.name == QUEUE_SOUND_TAB) hide = !ready;
-        else if (b.name == QUEUE_HOLO_TAB) hide = !ready || !layout.holo;
+        else if (b.name == QUEUE_HOLO_TAB || b.name == QUEUE_THEMES_TAB) hide = !ready || !layout.holo;
         else if (keyFor(b.name)) hide = !onOurPage(c) || !c.setup;
         else if (c.setup && onOurPage(c)) hide = true;   // the page's own buttons, under the setup page
         else if (b.name == QUEUE_CLOCK) hide = c.page != Page::Sounds;
@@ -3656,6 +4824,15 @@ void perfReport() {
          "%.0f tablet updates/s (PLAY page %s)",
          frames / secs, (ns + hookNs + soundNs) / 1e6 / secs, ns / 1e6 / secs, hk / 1e6 / secs, g / 1e6 / secs, r / 1e6 / secs,
          hookNs / 1e6 / secs, soundNs / 1e6 / secs, sounds / secs, s / secs, t / secs, a / secs, m / secs, ticks / secs, page ? "open" : "closed");
+    std::string bg;
+    for (int i = 0; i < std::min(backgroundCount.load(), 4); i++) {
+        U cpu = threadCpu100ns(backgrounds[i].thread);
+        char part[96];
+        snprintf(part, sizeof part, "%s%s %.2f", bg.empty() ? "" : ", ", backgrounds[i].name, (cpu - backgrounds[i].lastCpu) / 1e4 / secs);
+        backgrounds[i].lastCpu = cpu;
+        bg += part;
+    }
+    if (!bg.empty()) logf("perf: background threads, ms of CPU per second (off Echo's threads, below their priority): %s", bg.c_str());
     texlod::report();
 }
 
@@ -3798,7 +4975,7 @@ void onEvent(void* gs, U event, U actor, U component, int arg) {
     // MATCH started a search and CANCEL SEARCH, in its place, stopped it 80 ms later) or its
     // neighbour (LOW 1.3 s after HIGH): another of the page's buttons within a second is ignored.
     // The keyboard's keys and the SFX buttons are tapped in quick succession, so they're left out.
-    if (isOurs(component) && component != QUEUE_TAB && component != QUEUE_SOUND_TAB && component != QUEUE_HOLO_TAB && !keyFor(component) &&
+    if (isOurs(component) && component != QUEUE_TAB && component != QUEUE_SOUND_TAB && component != QUEUE_HOLO_TAB && component != QUEUE_THEMES_TAB && !keyFor(component) &&
         soundPad(component) < 0 && holoButton(component) < 0) {
         static U lastAt = 0, lastButton = 0;
         U now = GetTickCount64();
@@ -3829,9 +5006,17 @@ void onEvent(void* gs, U event, U actor, U component, int arg) {
         if (c.page == Page::Other) kick = Kick{gs, actor, c.stockTab, arg};
         c.page = Page::Queue;
     } else if (component == QUEUE_SOUND_TAB) {
-        if (c.page != Page::Sounds) { logf("tablet: SFX page selected"); playSound(SOUND_CLICK); c.editing = false; }
+        if (c.page != Page::Sounds || c.themes || c.effects || c.weather) { logf("tablet: MAPS page selected"); playSound(SOUND_CLICK); c.editing = false; }
         if (c.setup && c.setupSlot < 0) closeKeySetup(c);    // it was picking CLIP's key
         if (c.page == Page::Other) kick = Kick{gs, actor, c.stockTab, arg};
+        c.page = Page::Sounds;
+        c.themes = false, c.effects = 0, c.weather = false, c.flashUntil = 0;
+    } else if (component == QUEUE_THEMES_TAB && layout.holo) {
+        // (15 Nov) THEMES, its own tab: the MAPS page's canvas showing the themes (its corner button: the EFFECTS pages)
+        if (c.page != Page::Sounds || !(c.themes || c.effects || c.weather)) { logf("tablet: THEMES page selected"); playSound(SOUND_CLICK); c.editing = false; }
+        if (c.setup) closeKeySetup(c);
+        if (c.page == Page::Other) kick = Kick{gs, actor, c.stockTab, arg};
+        if (c.page != Page::Sounds || !(c.themes || c.effects || c.weather)) c.themes = true, c.effects = 0, c.weather = false, c.flashUntil = 0;
         c.page = Page::Sounds;
     } else if (component == QUEUE_HOLO_TAB && layout.holo) {
         if (c.page != Page::Holo) { logf("tablet: HOLO page selected"); playSound(SOUND_CLICK); }
@@ -3847,17 +5032,50 @@ void onEvent(void* gs, U event, U actor, U component, int arg) {
         if (stepper) c.holoHeld = U(hb) + 1, c.holoHeldAt = c.holoRepeatAt = GetTickCount64(), c.holoActor = actor, c.gs = gs;
         else c.holoHeld = 0;
     } else if (component == QUEUE_SOUND_EDIT && c.page == Page::Sounds && !c.setup) {
+        // (the soundboard's EDIT) MAPS -> THEMES (the THEMES tab) -> EFFECTS (page 3 only) -> WEATHER -> THEMES
         playSound(SOUND_CLICK);
-        c.editing = !c.editing;
+        if (c.weather) c.weather = false, c.themes = true;
+        else if (c.effects && c.effects * live::EFFECTS_PER_PAGE < live::EFFECTS) c.effects++;
+        else if (c.effects) c.effects = 0, c.weather = true;
+        else if (c.themes) c.themes = false, c.effects = live::FIRST_PAGE;
+        else c.themes = true;
         c.flashUntil = 0;
+        logf("tablet: %s page", c.weather ? "WEATHER" : c.effects ? ("EFFECTS " + std::to_string(c.effects)).c_str() : c.themes ? "THEMES" : "MAPS");
     } else if (int pad = c.page == Page::Sounds && !c.setup ? soundPad(component) : -1; pad >= 0) {
-        playSound(SOUND_CLICK);
-        if (c.editing || soundKeys[pad].empty()) openKeySetup(c, pad);
-        else {
-            logf("tablet: SFX %d pressed", pad + 1);
-            c.flash = soundNames[pad] + " - PRESSED " + soundLabels[pad];
-            c.flashUntil = GetTickCount64() + 2000;
-            pressKeys(soundKeys[pad]);
+        if (c.effects) {
+            std::string what = pad < live::EFFECTS_PER_PAGE ? live::toggle((c.effects - 1) * live::EFFECTS_PER_PAGE + pad) : "";
+            if (!what.empty()) {
+                playSound(SOUND_CLICK);
+                c.flash = what;
+                c.flashUntil = GetTickCount64() + 2000;
+            }
+        } else if (c.weather) {
+            std::string what = switchWeather(pad);
+            if (!what.empty()) {
+                playSound(SOUND_CLICK);
+                {
+                    std::lock_guard<std::mutex> lock(themesMutex);
+                    weatherMessage.clear();
+                }
+                c.flash = what;
+                c.flashUntil = GetTickCount64() + 4000;
+            }
+        } else if (c.themes) {
+            std::string what = switchTheme(pad);
+            if (!what.empty()) {
+                playSound(SOUND_CLICK);
+                {
+                    std::lock_guard<std::mutex> lock(themesMutex);
+                    themeMessage.clear();
+                }
+                c.flash = what;
+                c.flashUntil = GetTickCount64() + 4000;
+            }
+        } else if (pad < MAPS) {
+            playSound(SOUND_CLICK);
+            logf("tablet: map %s pressed", MAP_NAME[pad]);
+            c.flash = switchMap(pad);
+            c.flashUntil = GetTickCount64() + 3000;
         }
     } else if ((component == QUEUE_START || component == QUEUE_COMBAT) && c.page == Page::Queue) {
         bool combat = component == QUEUE_COMBAT;
@@ -4303,6 +5521,10 @@ void initialize() {
         holo::load();
         if (HANDLE t = CreateThread(nullptr, 0, holo::watch, nullptr, 0, nullptr)) CloseHandle(t);
     }
+    live::load();
+    loadThemes();   // (the theme this start is using: LIVE ARENA needs it before the THEMES page is opened)
+    loadWeather();
+    if (HANDLE t = CreateThread(nullptr, 0, live::watch, nullptr, 0, nullptr)) CloseHandle(t);
     if (HANDLE t = CreateThread(nullptr, 0, playersWatch, nullptr, 0, nullptr)) CloseHandle(t);
     if (HANDLE t = CreateThread(nullptr, 0, accessWatch, nullptr, 0, nullptr)) CloseHandle(t);
     if (HANDLE t = CreateThread(nullptr, 0, updateWatch, nullptr, 0, nullptr)) CloseHandle(t);

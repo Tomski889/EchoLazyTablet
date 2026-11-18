@@ -58,6 +58,23 @@ UPDATE_BUTTON = sym('echo_queue_update_button_v1')        # UPDATE AVAILABLE: op
 SOUND_TAB_BUTTON = sym('echo_queue_sound_tab_button_v1')  # the SFX tab, next to PLAY
 SOUND_EDIT_BUTTON = sym('echo_queue_sound_edit_button_v1')
 SOUND_PADS = 8                            # the SFX page's buttons, each with its own keybind
+# ARENA MAPS (on the SFX page): a picture per map, in the plugin's order (MAP_ID in echo_queue.cpp), from
+# installer/map_pictures/<id>.png (cropped to the picture's shape); a missing one is left empty.
+MAP_IDS = ('day', 'night', 'sunset', 'kronos', 'snow', 'aurora', 'asteroids', 'bedroom')
+MAP_CARDS = len(MAP_IDS)
+MAP_PICTURES = sym('echo_queue_map_pictures_v1')
+MAP_PICTURE_W, MAP_PICTURE_H, MAP_PICTURE_INSET = 256, 120, 10   # 8 cards: two rows of four, one pad high
+# (15 Nov) THEMES, EFFECTS and WEATHER cards get a picture too, from installer/page_pictures/<kind>_<id>.png:
+# one hidden picture per theme / effect / weather on its card's spot; the plugin shows the page's ones.
+# Themes and weathers in the order their tools list them (a card whose name differs shows no picture).
+THEME_IDS = ('synthwave', 'inferno', 'arctic', 'toxic', 'classic', 'royal', 'blackout', 'candy')
+WEATHER_IDS = ('clear', 'snow', 'blizzard', 'rain', 'storm', 'christmas')
+EFFECT_IDS = ('live_themes', 'goal_flash', 'disc_glow', 'disc_speed', 'rainbow', 'final_seconds', 'leader_glow', 'kickoff',
+              'shuffle', 'breathing', 'overtime_gold', 'possession', 'danger_zone', 'storm', 'team_tide', 'goal_party',
+              'arm_colours', 'theme_cycle', 'disc_heat', 'clock_colours')
+PAGE_PICTURE_LIST = [('theme', t) for t in THEME_IDS] + [('weather', w) for w in WEATHER_IDS] + [('effect', f) for f in EFFECT_IDS]
+PAGE_PICTURES = sym('echo_queue_page_pictures_v1')
+PAGE_PICTURE_COLS = 8
 
 
 def sound_button(i):
@@ -71,12 +88,14 @@ def sound_button(i):
 # tapped through an invisible grid of touch areas (a ring marks the pick); under them word buttons
 # to fine-tune it (< COLOUR / COLOUR >, DARKER / LIGHTER, PALER / BOLDER: one step a tap, hold to
 # keep going), each filled with the colour it leads to (the plugin tints them). Right: RAINBOW (the whole arms cycle
-# round the colour wheel) and its speed, and ARMS SOLID / SEE-THROUGH / HANDS ONLY (next start).
+# round the colour wheel) and its speed, and the ARM LOOK: hologram arms, see-through, just hands, or the normal arms.
 HOLO_TAB_BUTTON = sym('echo_queue_holo_tab_button_v1')
+THEMES_TAB_BUTTON = sym('echo_queue_themes_tab_button_v1')   # (15 Nov) the arena THEMES and EFFECTS, its own tab
 HOLO_BARS = ('blue', 'orange', 'lobby')
 HOLO_BAR_LABELS = ('BLUE TEAM', 'ORANGE TEAM', 'LOBBY')
 HOLO_SPEEDS = 5
-HOLO_LOOKS = ('solid', 'clear', 'hands', 'clear_hands')   # ARMS: SOLID / SEE-THROUGH / SOLID HANDS / CLEAR HANDS
+HOLO_LOOKS = ('solid', 'clear', 'hands', 'clear_hands', 'normal')   # ARM LOOK: HOLO ARMS / SEE-THROUGH ARMS / JUST HANDS / SEE-THROUGH HANDS / NORMAL ARMS
+HOLO_LOOK_LABELS = ('HOLO ARMS', 'SEE-THROUGH ARMS', 'JUST HANDS', 'SEE-THROUGH HANDS', 'NORMAL ARMS')
 HOLO_FINE = ('hue', 'light', 'sat')                 # the fine-tune pairs: COLOUR, BRIGHTNESS, VIVIDNESS
 HOLO_FIELD_COLS, HOLO_FIELD_ROWS, HOLO_GREYS = 20, 9, 12
 HOLO_FIELD_TOP, HOLO_FIELD_SPAN = .92, .84          # the field's lightness: top edge, top to bottom
@@ -170,7 +189,7 @@ TAB_IDLE_UV = (0.6904, 0.3645, 0.7393, 0.3937)
 TAB_SELECTED_UV = (0.6899, 0.3297, 0.7393, 0.3595)
 BGRA_TEMPLATE = 0x84b9a06506af66fe        # stock 128x128 B8G8R8A8 texture (header template)
 DXGI_B8G8R8A8_UNORM, DXGI_B8G8R8A8_UNORM_SRGB = 87, 91
-ICON_W, ICON_H = 512, 1024
+ICON_W, ICON_H = 512, 1152   # (1024 until the THEMES tab: its icons sit below)
 
 TEAL = (.05, .55, .54, 1)
 TEXT, WHITE, BLACK = (.78, .78, .78, 1), (1, 1, 1, 1), (0, 0, 0, 1)
@@ -289,11 +308,11 @@ def holo_texture(tex, uvs):
 def icon_texture(atlas):
     """ICON_W x ICON_H: the PLAY and SFX tabs (idle, selected) and the disc and house glyphs. -> (BGRA bytes, uvs)."""
     from PIL import Image
-    from disc_icon import chart, disc, house, lock, monitor, palette, potato, speaker, speed
+    from disc_icon import chart, disc, house, lock, monitor, mountains, palette, potato, sparkle, speed
     tex = Image.new('RGBA', (ICON_W, ICON_H), (0, 0, 0, 0))
     uvs = {}
     for col, (key, uv, glyph) in enumerate((('tab_idle', TAB_IDLE_UV, disc), ('tab_selected', TAB_SELECTED_UV, disc),
-                                            ('sound_idle', TAB_IDLE_UV, speaker), ('sound_selected', TAB_SELECTED_UV, speaker))):
+                                            ('sound_idle', TAB_IDLE_UV, mountains), ('sound_selected', TAB_SELECTED_UV, mountains))):
         frame = tab_frame(atlas, uv)
         w, h = frame.size
         g = glyph(round(h * .66))
@@ -312,6 +331,14 @@ def icon_texture(atlas):
         x = 260 + col * 124
         tex.paste(frame, (x, 132))
         uvs[key] = (x / ICON_W, 132 / ICON_H, (x + w) / ICON_W, (132 + h) / ICON_H)
+    for col, (key, uv) in enumerate((('themes_idle', TAB_IDLE_UV), ('themes_selected', TAB_SELECTED_UV))):   # the THEMES tab
+        frame = tab_frame(atlas, uv)
+        w, h = frame.size
+        g = sparkle(round(h * .66))
+        frame.alpha_composite(g, ((w - g.width) // 2, (h - g.height) // 2))
+        x = 4 + col * 124
+        tex.paste(frame, (x, 1028))
+        uvs[key] = (x / ICON_W, 1028 / ICON_H, (x + w) / ICON_W, (1028 + h) / ICON_H)
     for col, (key, glyph) in enumerate((('lock', lock), ('chart', chart), ('speed', speed), ('monitor', monitor))):
         tex.alpha_composite(glyph(120), (col * 128 + 4, 260))
         uvs[key] = ((col * 128 + 4) / ICON_W, 260 / ICON_H, (col * 128 + 124) / ICON_W, 380 / ICON_H)
@@ -333,6 +360,41 @@ def icon_texture(atlas):
     holo_texture(tex, uvs)
     r, g, b, a = tex.split()
     return Image.merge('RGBA', (b, g, r, a)).tobytes(), uvs
+
+
+def map_pictures():
+    """The maps' pictures side by side. -> (BGRA bytes, uv per map)."""
+    from pathlib import Path
+    from PIL import Image, ImageOps
+    w, h = MAP_PICTURE_W, MAP_PICTURE_H
+    tex = Image.new('RGBA', (w * MAP_CARDS, h), (0, 0, 0, 255))
+    uvs = []
+    for i, name in enumerate(MAP_IDS):
+        f = Path(__file__).with_name('map_pictures') / (name + '.png')
+        if f.exists():
+            tex.paste(ImageOps.fit(Image.open(f).convert('RGBA'), (w, h), Image.LANCZOS), (i * w, 0))
+        # half a texel in, so the edges don't pick up the next picture
+        uvs.append(((i * w + .5) / tex.width, .5 / h, ((i + 1) * w - .5) / tex.width, 1 - .5 / h))
+    r, g, b, a = tex.split()
+    return Image.merge('RGBA', (b, g, r, a)).tobytes(), uvs
+
+
+def page_pictures():
+    """THEMES / EFFECTS / WEATHER pictures in a grid, PAGE_PICTURE_COLS wide. -> (BGRA bytes, w, h, {(kind, id): uv})."""
+    from pathlib import Path
+    from PIL import Image, ImageOps
+    w, h = MAP_PICTURE_W, MAP_PICTURE_H
+    rows = -(-len(PAGE_PICTURE_LIST) // PAGE_PICTURE_COLS)
+    tex = Image.new('RGBA', (w * PAGE_PICTURE_COLS, h * rows), (0, 0, 0, 255))
+    uvs = {}
+    for i, (kind, name) in enumerate(PAGE_PICTURE_LIST):
+        x, y = i % PAGE_PICTURE_COLS * w, i // PAGE_PICTURE_COLS * h
+        f = Path(__file__).with_name('page_pictures') / f'{kind}_{name}.png'
+        if f.exists():
+            tex.paste(ImageOps.fit(Image.open(f).convert('RGBA'), (w, h), Image.LANCZOS), (x, y))
+        uvs[kind, name] = ((x + .5) / tex.width, (y + .5) / tex.height, (x + w - .5) / tex.width, (y + h - .5) / tex.height)
+    r, g, b, a = tex.split()
+    return Image.merge('RGBA', (b, g, r, a)).tobytes(), tex.width, tex.height, uvs
 
 
 def texture_pair(m, w, h, pixels, fmt=DXGI_B8G8R8A8_UNORM_SRGB):
@@ -477,7 +539,7 @@ def build(m, holo=None):
                         'It keeps working: EchoLazyTablet only moves its tabs along to make room.')
     elif details:
         notes.insert(0, 'Another mod has changed your tablet. EchoLazyTablet builds around it and leaves it as it is.')
-    ours = 3 if holo else 2                 # SFX, PLAY (and HOLO) come first
+    ours = 4 if holo else 2                 # MAPS, PLAY (and HOLO, THEMES) come first
     centers = tab_centers(len(tabs) + ours)
     for t, new in zip(tabs, centers[ours:]):
         dx = new - t['center']
@@ -490,12 +552,16 @@ def build(m, holo=None):
             buttons.rows[r] = bytes(row)
     atlas = atlas_image(m)
     icon_pixels, icon_uvs = icon_texture(atlas)
+    picture_pixels, map_picture_uvs = map_pictures()
+    page_pixels, page_w, page_h, page_uvs = page_pictures()
     c = centers[1]
     tab_rect = (c - TAB_SIZE / 2, BAR_Y[0], c + TAB_SIZE / 2, BAR_Y[1])
     c = centers[0]
     sound_tab_rect = (c - TAB_SIZE / 2, BAR_Y[0], c + TAB_SIZE / 2, BAR_Y[1])
     c = centers[2] if holo else centers[1]   # (without the mod: hidden, on PLAY's spot)
     holo_tab_rect = (c - TAB_SIZE / 2, BAR_Y[0], c + TAB_SIZE / 2, BAR_Y[1])
+    c = centers[3] if holo else centers[1]
+    themes_tab_rect = (c - TAB_SIZE / 2, BAR_Y[0], c + TAB_SIZE / 2, BAR_Y[1])
 
     # Everything EchoLazyTablet shows is one overlay canvas covering the tablet, shown by the root's
     # unused element 6, so no canvas another mod checks changes its element count. The PLAY
@@ -673,16 +739,36 @@ def build(m, holo=None):
     sprite('echo_queue_sound_card_v1', CARD, CARD_UV, WHITE)
     e['sound_status'] = text('echo_queue_sound_status_v1', 'TAP A SOUND TO PRESS ITS KEY', (44, 20, 740, 98), 28, TEXT, align=0, capacity=96)
     _, e['sound_edit_text'] = lobby_row('echo_queue_sound_edit_row_v1', SOUND_EDIT, CLIP_FILL, CLIP_BORDER, 'EDIT', size=36)
+    # Now ARENA MAPS (the plugin's MAPS page): the first MAP_CARDS pads are cards (two rows of four, each one
+    # pad high), each a picture of the map with its name in a box the picture's width underneath, and
+    # IN USE / NEXT MATCH above.
+    # The other pads are kept (hidden, no touch area) so the plugin's tables stay the same length.
     sound_rects = []
+    card_h = SOUND_PAD_H
     for i in range(SOUND_PADS):
         x0 = SOUND_PAD_ORIGIN[0] + i % 4 * (SOUND_PAD_W + SOUND_PAD_GAP)
         y0 = SOUND_PAD_ORIGIN[1] + i // 4 * (SOUND_PAD_H + SOUND_PAD_GAP)
-        rect = (x0, y0, x0 + SOUND_PAD_W, y0 + SOUND_PAD_H)
-        box = sprite(f'echo_queue_sound_{i}_box_v1', rect, CARD_ACTIVE_UV, WHITE)
-        sprite(f'echo_queue_sound_{i}_fill_v1', (6, 6, SOUND_PAD_W - 6, SOUND_PAD_H - 6), ROW_FILL_UV, (*FIND_FILL[:3], .55), parent=box, texture=ROW_ATLAS)
-        e[f'sound_caption_{i}'] = text(f'echo_queue_sound_{i}_caption_v1', f'SOUND {i + 1}', (x0, y0 + 14, x0 + SOUND_PAD_W, y0 + 64), 24, ACCENT)
-        e[f'sound_text_{i}'] = text(f'echo_queue_sound_{i}_text_v1', 'TAP TO SET', (x0 + 6, y0 + 64, x0 + SOUND_PAD_W - 6, y0 + SOUND_PAD_H - 14), 26, WHITE)
-        sound_rects.append(rect)
+        card = i < MAP_CARDS
+        rect = (x0, y0, x0 + SOUND_PAD_W, y0 + card_h)
+        box = sprite(f'echo_queue_sound_{i}_box_v1', rect, CARD_ACTIVE_UV, WHITE, hidden=not card)
+        sprite(f'echo_queue_sound_{i}_fill_v1', (6, 6, SOUND_PAD_W - 6, card_h - 6), ROW_FILL_UV, (*FIND_FILL[:3], .55), parent=box, texture=ROW_ATLAS)
+        px0, px1 = x0 + MAP_PICTURE_INSET, x0 + SOUND_PAD_W - MAP_PICTURE_INSET
+        py0 = y0 + 40
+        py1 = py0 + round((px1 - px0) * MAP_PICTURE_H / MAP_PICTURE_W)
+        ny1 = y0 + card_h - MAP_PICTURE_INSET
+        if card:
+            e[f'map_picture_{i}'] = sprite(f'echo_queue_map_{i}_picture_v1', (px0, py0, px1, py1), map_picture_uvs[i], WHITE, texture=MAP_PICTURES)
+            # this card spot's THEMES / WEATHER / EFFECTS pictures (all hidden; the plugin shows the page's)
+            for kind, ids in (('theme', THEME_IDS), ('weather', WEATHER_IDS), ('effect', EFFECT_IDS)):
+                for k, name in enumerate(ids):
+                    if k % SOUND_PADS == i:
+                        e[f'pic_{kind}_{k}'] = sprite(f'echo_queue_{kind}_{name}_picture_v1', (px0, py0, px1, py1), page_uvs[kind, name],
+                                                      WHITE, hidden=True, texture=PAGE_PICTURES)
+            sprite(f'echo_queue_map_{i}_name_box_v1', (px0, py1 + 6, px1, ny1), ROW_FILL_UV, FIND_FILL, texture=ROW_ATLAS)
+        e[f'sound_caption_{i}'] = text(f'echo_queue_sound_{i}_caption_v1', '', (x0, y0 + 6, x0 + SOUND_PAD_W, y0 + 38), 20, ACCENT, hidden=not card)
+        e[f'sound_text_{i}'] = text(f'echo_queue_sound_{i}_text_v1', '', (px0 + 2, py1 + 6, px1 - 2, ny1), 18, WHITE, hidden=not card)
+        if card:
+            sound_rects.append(rect)
 
     # The HOLO page (see HOLO_CONTROLS). Built even without the mod (hidden, never shown), so
     # element numbers don't move. Buttons are dark pills; lit (the plugin shows it) a teal pill
@@ -748,11 +834,11 @@ def build(m, holo=None):
     for i in range(HOLO_SPEEDS):
         x = 792 + i * 37.5
         holo_btn(f'speed_{i}', (x, 166, x + 34, 200), str(i + 1), 19, shape='dot')
-    text('echo_queue_holo_look_caption_v2', 'ARMS', (792, 234, 976, 256), 15, DIM)
-    for i, name in enumerate(('SOLID', 'SEE-THROUGH', 'SOLID HANDS', 'CLEAR HANDS')):
-        holo_btn(f'look_{HOLO_LOOKS[i]}', (792, 262 + i * 46, 976, 304 + i * 46), name, 18, shape='holo_pill_short')
-    text('echo_queue_holo_look_note_v2', 'CHANGES NEXT TIME', (792, 444, 976, 459), 13, DIM)
-    text('echo_queue_holo_look_note2_v2', 'YOU START ECHO', (792, 459, 976, 474), 13, DIM)
+    text('echo_queue_holo_look_caption_v2', 'ARM LOOK', (792, 212, 976, 234), 15, DIM)
+    for i, name in enumerate(HOLO_LOOK_LABELS):
+        holo_btn(f'look_{HOLO_LOOKS[i]}', (792, 240 + i * 42, 976, 278 + i * 42), name, 16, shape='holo_pill_short')
+    text('echo_queue_holo_look_note_v2', 'NORMAL ARMS NEED', (792, 448, 976, 463), 13, DIM)
+    text('echo_queue_holo_look_note2_v2', 'AN ECHO RESTART', (792, 463, 976, 478), 13, DIM)
     e['holo_status'] = text('echo_queue_holo_status_v2', 'TAP A COLOUR, THEN FINE-TUNE IT WITH THE BUTTONS UNDER IT', (24, 478, 976, 506), 17, DIM, capacity=96)
 
     # The title strip (a cover over the stock title, PLAY's own title) and the tab, top level.
@@ -782,6 +868,8 @@ def build(m, holo=None):
     sound_tab_selected = sprite('echo_queue_sound_tab_selected_v1', sound_tab_rect, icon_uvs['sound_selected'], WHITE, hidden=True, texture=ICON_TEXTURE)
     holo_tab_icon = sprite('echo_queue_holo_tab_icon_v1', holo_tab_rect, icon_uvs['holo_idle'], WHITE, hidden=not holo, texture=ICON_TEXTURE)
     holo_tab_selected = sprite('echo_queue_holo_tab_selected_v1', holo_tab_rect, icon_uvs['holo_selected'], WHITE, hidden=True, texture=ICON_TEXTURE)
+    themes_tab_icon = sprite('echo_queue_themes_tab_icon_v1', themes_tab_rect, icon_uvs['themes_idle'], WHITE, hidden=not holo, texture=ICON_TEXTURE)
+    themes_tab_selected = sprite('echo_queue_themes_tab_selected_v1', themes_tab_rect, icon_uvs['themes_selected'], WHITE, hidden=True, texture=ICON_TEXTURE)
 
     # The root's element 6 (stock: a hidden 96 px panel above the tablet, unused) becomes the
     # overlay's child-canvas element; it keeps its name and index (VR-tested 23 Oct).
@@ -843,6 +931,7 @@ def build(m, holo=None):
         add_button(sound_button(i), rect)
     if holo:   # without the mod there's nothing to touch: no tab, no segments
         add_button(HOLO_TAB_BUTTON, holo_tab_rect, on_page=False)
+        add_button(THEMES_TAB_BUTTON, themes_tab_rect, on_page=False)
         for key in HOLO_CONTROLS:
             add_button(holo_button(key), holo_rects[key])
     moved_rows = {r for t in tabs for r in t['rows']}
@@ -852,11 +941,14 @@ def build(m, holo=None):
     icon_cpu, icon_gpu = texture_pair(m, ICON_W, ICON_H, icon_pixels)
     resources = [(CV, ROOT_CANVAS, root.serialize()), (CV, NAV_CANVAS, nav.serialize()), (CV, OVERLAY, page.serialize()),
                  (BUTTONS, LEVEL, buttons.serialize()), (TEX, ICON_TEXTURE, icon_cpu), (TEX_GPU, ICON_TEXTURE, icon_gpu)]
+    resources += list(zip((TEX, TEX_GPU), (MAP_PICTURES, MAP_PICTURES), texture_pair(m, MAP_PICTURE_W * MAP_CARDS, MAP_PICTURE_H, picture_pixels)))
+    resources += list(zip((TEX, TEX_GPU), (PAGE_PICTURES, PAGE_PICTURES), texture_pair(m, page_w, page_h, page_pixels)))
     e.update(page=page_group, cover=cover, header=header, title=title, subtitle=subtitle, subtitle_box=subtitle_box,
              subtitle_box_wide=subtitle_box_wide, clock=clock, clock_format=clock_format,
              clock_format_text=clock_format_text, tab_icon=tab_icon, tab_selected=tab_selected,
              sound_tab_icon=sound_tab_icon, sound_tab_selected=sound_tab_selected,
-             holo_tab_icon=holo_tab_icon, holo_tab_selected=holo_tab_selected)
+             holo_tab_icon=holo_tab_icon, holo_tab_selected=holo_tab_selected,
+             themes_tab_icon=themes_tab_icon, themes_tab_selected=themes_tab_selected)
 
     # How the plugin will recognise each canvas, given every canvas in the game after this build.
     final = {}
@@ -980,10 +1072,14 @@ def page_header(built):
             'constexpr uint64_t QUEUE_SOUND_BUTTONS[] = {' + ', '.join(f'0x{sound_button(i):016x}' for i in range(SOUND_PADS)) + '};\n'
             'constexpr unsigned QUEUE_SOUND_TEXTS[] = {' + ', '.join(str(e[f'sound_text_{i}']) for i in range(SOUND_PADS)) + '};\n'
             'constexpr unsigned QUEUE_SOUND_CAPTIONS[] = {' + ', '.join(str(e[f'sound_caption_{i}']) for i in range(SOUND_PADS)) + '};\n'
-            f"constexpr unsigned QUEUE_OVERLAY_ELEMENTS={built['layout']['overlay_elements']}, QUEUE_LAYOUT_VERSION={built['layout']['version']};\n"
+            'constexpr unsigned QUEUE_MAP_PICTURES[] = {' + ', '.join(str(e[f'map_picture_{i}']) for i in range(MAP_CARDS)) + '};\n'
+            + ''.join(f'constexpr unsigned QUEUE_{kind.upper()}_PICTURES[] = {{' + ', '.join(str(e[f'pic_{kind}_{k}']) for k in range(len(ids))) + '};\n'
+                      + f'const char* const QUEUE_{kind.upper()}_PICTURE_IDS[] = {{' + ', '.join(f'"{n}"' for n in ids) + '};\n'
+                      for kind, ids in (('theme', THEME_IDS), ('weather', WEATHER_IDS), ('effect', EFFECT_IDS)))
+            + f"constexpr unsigned QUEUE_OVERLAY_ELEMENTS={built['layout']['overlay_elements']}, QUEUE_LAYOUT_VERSION={built['layout']['version']};\n"
             + ''.join(f'constexpr unsigned QUEUE_PAGE_{k.upper()}={v};\n' for k, v in e.items()
-                      if not k.startswith('key_') or k in ('key_no_clip_app_text', 'key_ctrl_text', 'key_shift_text', 'key_alt_text'))
-            + f'constexpr uint64_t QUEUE_HOLO_TAB=0x{HOLO_TAB_BUTTON:016x};\n'
+                      if not k.startswith('pic_') and (not k.startswith('key_') or k in ('key_no_clip_app_text', 'key_ctrl_text', 'key_shift_text', 'key_alt_text')))
+            + f'constexpr uint64_t QUEUE_HOLO_TAB=0x{HOLO_TAB_BUTTON:016x}, QUEUE_THEMES_TAB=0x{THEMES_TAB_BUTTON:016x};\n'
             + f'constexpr unsigned HOLO_BAR_COUNT={len(HOLO_BARS)}, HOLO_SPEEDS={HOLO_SPEEDS}, HOLO_LOOKS={len(HOLO_LOOKS)}, HOLO_FINE={len(HOLO_FINE)}, HOLO_CONTROL_COUNT={len(HOLO_CONTROLS)};\n'
             + f"constexpr unsigned HOLO_RESET={HOLO_CONTROLS.index('reset')}, HOLO_RAINBOW={HOLO_CONTROLS.index('rainbow')}, "
             + f"HOLO_SPEED_FIRST={HOLO_CONTROLS.index('speed_0')}, HOLO_LOOK_FIRST={HOLO_CONTROLS.index('look_solid')}, HOLO_FINE_FIRST={HOLO_CONTROLS.index('hue_minus')};\n"

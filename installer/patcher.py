@@ -30,7 +30,8 @@ RECORD = E.MID + '.echoqueue.json'
 BACKUP = E.MID + '.echoqueue-backup'
 OLD_BACKUP = E.MID + '.before-echoqueue'          # left by the first installer (when it was EchoQueue)
 OUR_RESOURCES = {(tablet.CV, tablet.ROOT_CANVAS), (tablet.CV, tablet.NAV_CANVAS), (tablet.CV, tablet.PAGE), (tablet.CV, tablet.OVERLAY),
-                 (tablet.BUTTONS, tablet.LEVEL), (tablet.TEX, tablet.ICON_TEXTURE), (tablet.TEX_GPU, tablet.ICON_TEXTURE)}
+                 (tablet.BUTTONS, tablet.LEVEL), (tablet.TEX, tablet.ICON_TEXTURE), (tablet.TEX_GPU, tablet.ICON_TEXTURE),
+                 (tablet.TEX, tablet.MAP_PICTURES), (tablet.TEX_GPU, tablet.MAP_PICTURES)}
 PLUGIN_FILES = ('EchoLazyTablet.dll', 'EchoLazyTablet.ini', 'EchoLazyTablet.layout')
 # EchoLazyTablet was called EchoQueue until 3.13: its plugin files, replaced on install (settings carried over).
 OLD_DLL, OLD_INI, OLD_LAYOUT = 'EchoQueue.dll', 'EchoQueue.ini', 'EchoQueue.layout'
@@ -660,7 +661,9 @@ def fill_gaps(game, m, log=print):
 # manifest kept for each ARMS look (.holo-solid / -clear / -hands / -clear-hands; the plugin swaps
 # them). install_flat --revert takes them out again.
 ARMS_DIR = 'arms'
-ARMS_LOOKS = ('solid', 'clear', 'hands', 'clear-hands')
+ARMS_LOOKS = ('solid', 'clear', 'hands', 'clear-hands', 'normal')
+ARMS_LOOK_NAMES = {'solid': 'HOLO ARMS', 'clear': 'SEE-THROUGH ARMS', 'hands': 'JUST HANDS', 'clear-hands': 'SEE-THROUGH HANDS',
+                   'normal': 'NORMAL ARMS'}
 ARMS_BUILD_ENV = dict(HOLO_KEEP='46adff5980245670,b7d338793fa37832,230554bc3beca38c,c2434c5a99e139ce,7b9a4c9fd03f37eb',
                       HOLO_SIGNATURE='1', HOLO_PIECES='1', HOLO_LAYER_TEST='1', HOLO_ALT_CLEAR='1', HOLO_ALT_HANDS='1',
                       HOLO_CLEAR_GROUPS=','.join(f'{s}:000c_0001' for s in range(6)))
@@ -728,7 +731,7 @@ def arms_install(game, log=print):
                     nxt = want.read_bytes()
                 _replace(p, want.read_bytes())
         _replace(live, nxt)
-    log(f'Installed the hologram arms (ARMS: {look.upper().replace("-", " ")}); change them on the tablet\'s HOLO page.')
+    log(f'Installed the hologram arms (ARM LOOK: {ARMS_LOOK_NAMES[look]}); change them on the tablet\'s HOLO page.')
 
 
 @_plain

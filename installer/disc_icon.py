@@ -164,6 +164,23 @@ def speaker(size):
     return img.resize((size, size), Image.LANCZOS)
 
 
+def mountains(size):
+    """The MAPS tab (was the soundboard): two peaks with snow caps cut out, and a sun."""
+    s = 4
+    w = size * s
+    img = Image.new('RGBA', (w, w), CLEAR)
+    d = ImageDraw.Draw(img)
+    d.ellipse((w * .66, w * .1, w * .86, w * .3), fill=WHITE)
+    d.polygon([(w * .02, w * .86), (w * .36, w * .24), (w * .7, w * .86)], fill=WHITE)
+    d.polygon([(w * .4, w * .86), (w * .68, w * .42), (w * .98, w * .86)], fill=WHITE)
+    # snow line on the big peak: a zigzag cut just below its top
+    d.line([(w * .275, w * .4), (w * .32, w * .45), (w * .36, w * .4), (w * .4, w * .45), (w * .445, w * .4)], fill=CLEAR, width=round(w * .035))
+    # a gap between the two peaks so they read as two
+    d.line([(w * .4, w * .86), (w * .68, w * .42)], fill=CLEAR, width=round(w * .04))
+    d.polygon([(w * .42, w * .86), (w * .68, w * .45), (w * .96, w * .86)], fill=WHITE)
+    return img.resize((size, size), Image.LANCZOS)
+
+
 def palette(size):
     """The HOLO tab: six dots round a ring, like a colour wheel, with a dot in the middle."""
     s = 4
@@ -176,4 +193,24 @@ def palette(size):
         x, y = c + ring * math.cos(a), c + ring * math.sin(a)
         d.ellipse((x - r, y - r, x + r, y + r), fill=WHITE)
     d.ellipse((c - r * .8, c - r * .8, c + r * .8, c + r * .8), fill=WHITE)
+    return img.resize((size, size), Image.LANCZOS)
+
+
+def sparkle(size):
+    """The THEMES tab: a big four-pointed star of light with two small ones, for the arena's lighting."""
+    s = 4
+    w = size * s
+    img = Image.new('RGBA', (w, w), CLEAR)
+    d = ImageDraw.Draw(img)
+
+    def star(cx, cy, r, waist):
+        pts = []
+        for k in range(8):
+            a = math.radians(k * 45 - 90)
+            rr = r if k % 2 == 0 else r * waist
+            pts.append((cx + rr * math.cos(a), cy + rr * math.sin(a)))
+        d.polygon(pts, fill=WHITE)
+    star(w * .42, w * .56, w * .4, .22)
+    star(w * .8, w * .2, w * .17, .3)
+    star(w * .82, w * .74, w * .1, .32)
     return img.resize((size, size), Image.LANCZOS)
